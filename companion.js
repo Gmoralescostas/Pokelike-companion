@@ -1,4 +1,4 @@
-/* Pokelike Companion v0.10.1 — solo lectura.
+/* Pokelike Companion v0.10.2 — solo lectura.
    Lee el estado del juego y usa sus propias funciones de cálculo.
    No hace clics ni modifica la partida. La semilla aleatoria del juego se
    guarda y se restaura alrededor de cada cálculo para no alterar los combates. */
@@ -981,6 +981,69 @@
         : `<div class="${m.gain != null && m.gain >= 4 ? 'plc-warn' : 'plc-sub'}">${esc(m.st.name)} disponible para ${esc(nm(m.p))}${m.gain != null ? ': ' + sgn(m.gain) + ' pts' : ''}${m.p.heldItem ? ' (dejaría ' + esc(itemName(m.p.heldItem)) + ')' : ''}.</div>`).join('');
   }
 
+  /* ---------- intercambios ---------- */
+  // El juego oculta qué Pokémon hay en cada oferta: solo enseña un tipo y el nivel.
+  // La recomendación usa solo eso (no lee la especie oculta).
+  const TRADE_PLUS = () => tg(() => ENDLESS2_TRADE_LEVELS, 3) || 3;
+  function tradeStage() {
+    const sc = document.getElementById('trade-screen');
+    if (!sc || sc.offsetParent === null) return null;
+    const list = document.getElementById('trade-team-list'), ch = document.getElementById('trade-choices');
+    if (ch && ch.style.display !== 'none' && ch.children.length) return { stage: 'offers', el: ch };
+    if (list && list.style.display !== 'none' && list.children.length) return { stage: 'pick', el: list };
+    return null;
+  }
+  function poolIds(s, R) { return (withSeed(() => tg(() => R.pool(s.currentMap || 0), [])) || []).filter(id => dex(id)); }
+  const sampleN = (a, n) => { const c = a.slice(), o = []; while (c.length && o.length < n) o.push(c.splice(Math.floor(Math.random() * c.length), 1)[0]); return o; };
+  // Paso 1: a quién mandar. Valor esperado de cambiarlo por lo que suele salir en este mapa (su nivel + 3).
+  function tradePickData(s, R, team, bosses) {
+    return pmemo('tradepick', s, () => {
+      if (!canSim(s, team, bosses)) return null;
+      const base = baseOutlook(s, team, bosses), ids = poolIds(s, R), tier = tierForMap(s.currentMap || 0);
+      if (!ids.length) return null;
+      const rows = team.map((p, i) => {
+        const lv = Math.min(100, p.level + TRADE_PLUS());
+        let ok = ids.filter(id => tg(() => minLevelForSpecies(id), 1) <= lv); if (!ok.length) ok = ids;
+        const g = sampleN(ok, 4).map(id => { const m = mkMon(id, lv, tier); return m ? Math.round(gainOf(teamOutlook(s, team.map((q, j) => j === i ? m : q), bosses, 30), base)) : null; }).filter(x => x != null).sort((a, b) => b - a);
+        const exp = g.length ? Math.round((g[0] + (g[1] ?? g[0])) / 2) : 0;
+        return { p, i, exp, lv };
+      }).sort((a, b) => b.exp - a.exp);
+      return { rows, best: rows[0] };
+    });
+  }
+  // Paso 2: qué oferta coger, sabiendo solo su tipo y nivel.
+  function tradeOfferData(s, R, team, bosses) {
+    return pmemo('tradeoffers', s, () => {
+      const st = s.savedTrade;
+      if (!st || !Array.isArray(st.offers) || !team[st.idx] || !canSim(s, team, bosses)) return null;
+      const base = baseOutlook(s, team, bosses), ids = poolIds(s, R), tier = tierForMap(s.currentMap || 0), out = team[st.idx];
+      const rows = st.offers.map((o, k) => {
+        const T = o._revealType || (o.types || ['Normal'])[0], lv = o.level;
+        let c = ids.filter(id => (dex(id).types || []).includes(T) && tg(() => minLevelForSpecies(id), 1) <= lv);
+        if (!c.length) c = ids.filter(id => (dex(id).types || []).includes(T));
+        const g = sampleN(c, 5).map(id => { const m = mkMon(id, lv, tier); return m ? Math.round(gainOf(teamOutlook(s, team.map((q, j) => j === st.idx ? m : q), bosses, 30), base)) : null; }).filter(x => x != null);
+        const avg = g.length ? Math.round(sum(g) / g.length) : 0, good = g.length ? Math.round(g.filter(x => x > 0).length / g.length * 100) : 0;
+        return { k, T, lv, avg, good, n: c.length };
+      });
+      const best = rows.slice().sort((a, b) => b.avg - a.avg)[0];
+      return { out, rows, best, take: best && best.avg > 0 };
+    });
+  }
+  function htmlTrade(ts, pick, off) {
+    if (ts.stage === 'pick' && pick) {
+      const b = pick.best;
+      return `<div class="${b.exp > 0 ? 'plc-good' : 'plc-mid'} plc-big">${b.exp > 0 ? 'Manda a ' + esc(nm(b.p)) : 'Intercambiar no compensa ahora'}</div>
+        <table>${pick.rows.map(r => `<tr><td><b>${esc(nm(r.p))}</b> <span class="plc-sub">Nv ${r.p.level} · tier ${r.p.moveTier ?? 1}</span><div class="plc-sub">recibirías nv ${r.lv}</div></td><td class="plc-num"><b class="${r.exp > 0 ? 'plc-good' : r.exp < 0 ? 'plc-bad' : ''}">${sgn(r.exp)}</b></td></tr>`).join('')}</table>
+        <div class="plc-sub">Puntos esperados si mandas a ese Pokémon: media de las mejores ofertas que suelen salir en este mapa a su nivel + ${TRADE_PLUS()}. Si todo sale negativo, sáltate el intercambio.</div>`;
+    }
+    if (ts.stage === 'offers' && off) {
+      return `<div class="${off.take ? 'plc-good' : 'plc-mid'} plc-big">${off.take ? 'Coge la oferta ' + (off.best.k + 1) + ' (' + esc(off.best.T) + ')' : 'Ninguna oferta compensa: pulsa saltar y te quedas a ' + esc(nm(off.out))}</div>
+        <table>${off.rows.map(r => `<tr><td><b>Oferta ${r.k + 1}</b> ${chip(r.T)} <span class="plc-sub">Nv ${r.lv}</span><div class="plc-sub">mejora tu equipo en el ${r.good}% de los casos (${r.n} especies posibles)</div></td><td class="plc-num"><b class="${r.avg > 0 ? 'plc-good' : r.avg < 0 ? 'plc-bad' : ''}">${sgn(r.avg)}</b></td></tr>`).join('')}</table>
+        <div class="plc-sub">El juego oculta qué Pokémon es: la nota es la media de las especies del mapa con ese tipo, en lugar de ${esc(nm(off.out))}.</div>`;
+    }
+    return '<div class="plc-sub">Calculando el intercambio…</div>';
+  }
+
   function choiceData(s, team, bosses, vc) {
     return memo('choice', () => {
       const tier = tierForMap(s.currentMap || 0), avg = team.length ? sum(team.map(p => p.level)) / team.length : 5;
@@ -1051,7 +1114,7 @@
     return JSON.stringify([s.runSeed, s.currentMap, s.eliteIndex, (s.items || []).map(i => i && (i.id || i)),
       (s.team || []).map(p => [p._uid, p.level, p.currentHp, p.maxHp, p.moveTier, p.heldItem && (p.heldItem.id || p.heldItem), p.speciesId]),
       Object.values((s.map && s.map.nodes) || {}).filter(n => n.visited || n.accessible).map(n => n.id + (n.visited ? 'v' : 'a')).join(),
-      vc && vc.cards.map(c => [c.id, c.level]), vi && vi.map(x => x.it.id), !!tg(visibleTutor, null), (tg(visiblePassives, null) || []).map(x => x.it.id), (s.passives || []).map(x => x && x.id)]);
+      vc && vc.cards.map(c => [c.id, c.level]), vi && vi.map(x => x.it.id), !!tg(visibleTutor, null), (tg(tradeStage, null) || {}).stage, s.savedTrade && s.savedTrade.idx, (tg(visiblePassives, null) || []).map(x => x.it.id), (s.passives || []).map(x => x && x.id)]);
   }
 
   /* ---------- alertas, checklist y marcas sobre el juego ---------- */
@@ -1144,6 +1207,11 @@
       const vt = tg(visibleTutor, null), rows = vt ? [...vt.querySelectorAll('.equip-pokemon-row')] : [];
       if (rows.length === last.tdat.rows.length) last.tdat.rows.forEach((r, i) => { if (!r.maxed) mark(rows[i], r === last.tdat.best ? 'good' : 'info', (r === last.tdat.best ? 'enseñar · ' : '') + sgn(r.gain) + ' pts'); });
     }
+    if (last.ts) {
+      const ts = tg(tradeStage, null);
+      if (ts && ts.stage === 'pick' && last.tpick) { const kids = [...ts.el.children]; last.tpick.rows.forEach(r => { const el = kids[r.i]; if (el) mark(el, r === last.tpick.best && r.exp > 0 ? 'good' : r.exp < 0 ? 'bad' : 'info', (r === last.tpick.best && r.exp > 0 ? 'mandar · ' : '') + sgn(r.exp) + ' pts'); }); }
+      if (ts && ts.stage === 'offers' && last.toff) { const kids = [...ts.el.children]; last.toff.rows.forEach(r => { const el = kids[r.k]; if (el) mark(el, r === last.toff.best && last.toff.take ? 'good' : 'info', (r === last.toff.best && last.toff.take ? 'coger · ' : '') + sgn(r.avg) + ' pts'); }); }
+    }
     if (last.pdat) {
       const vp = tg(visiblePassives, null);
       if (vp) vp.forEach(v => { const r = last.pdat.rows.find(k => k.it === v.it); if (r) mark(v.el, r === last.pdat.best && r.gain >= 2 ? 'good' : 'info', sgn(r.gain) + ' pts'); });
@@ -1178,7 +1246,7 @@
     if (sig === lastSig) return;
     lastSig = sig;
     if (sig !== memoSig) { memoSig = sig; memoMap.clear(); }
-    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.10.1${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
+    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.10.2${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
     if (missing.length) hl += `<div class="plc-warn">Compatibilidad parcial con esta versión. Falta: ${esc(missing.join(', '))}</div>`;
     if (!seedOK()) hl += '<div class="plc-warn">Cálculo de daño desactivado: no puedo proteger la semilla del juego en esta versión.</div>';
     hl += reminders.map(r => `<div class="plc-rem">${esc(r.msg)}<button data-plc-rem="${r.id}" title="Descartar">×</button></div>`).join('');
@@ -1188,11 +1256,15 @@
     const viAdv = vi ? (viSim || vi.map(x => ({ it: x.it, b: tg(() => bestHolder(x.it, team, bosses[0], s.items || []), null) }))) : null;
     const vt = tg(visibleTutor, null), tdat = vt ? tg(() => tutorData(s, team, bosses), null) : null;
     const vp = tg(visiblePassives, null), pdat = vp ? tg(() => passiveData(s, team, bosses, vp), null) : null;
+    const ts = tg(tradeStage, null);
+    const tpick = ts && ts.stage === 'pick' ? tg(() => tradePickData(s, R, team, bosses), null) : null;
+    const toff = ts && ts.stage === 'offers' ? tg(() => tradeOfferData(s, R, team, bosses), null) : null;
     let hr = '<h2>Lo que viene</h2>';
-    const choosing = !!(cd || viAdv || tdat || pdat);
+    const choosing = !!(cd || viAdv || tdat || pdat || ts);
     if (cd || viAdv) hr += '<h3>Elección en pantalla</h3>' + tg(() => htmlChoice(cd, viAdv, bosses), '');
     if (tdat) hr += '<h3>Tutor de ataques</h3>' + tg(() => htmlTutor(tdat), '');
     if (pdat) hr += '<h3>Pasiva en pantalla</h3>' + tg(() => htmlPassives(pdat), '');
+    if (ts) hr += '<h3>Intercambio</h3>' + tg(() => htmlTrade(ts, tpick, toff), '');
     if (!team.length) {
       last = { cd, viAdv, issues: [], adv: null }; setAlert([]); nodeBox.innerHTML = '';
       put(L, hl + '<div class="plc-sub">Empieza o reanuda un run de Story. Battle Tower llegará en una fase posterior.</div>'); put(Rp, hr, true); return;
@@ -1203,7 +1275,7 @@
     const nw = tg(() => nodeWins(s, R, team, bosses), null);
     const checks = tg(() => buildChecks(s, team, bosses, adv, issues, sp && sp.fights, nw), []) || [];
     const prevRoute = last && last.route;
-    last = { cd, viAdv, tdat, pdat, vp, issues, adv, sfBoss: bosses[0] ? tg(() => simFight(s, team, bosses[0]), null) : null, bossName: bosses[0] ? bosses[0].name : null };
+    last = { cd, viAdv, tdat, pdat, vp, ts, tpick, toff, issues, adv, sfBoss: bosses[0] ? tg(() => simFight(s, team, bosses[0]), null) : null, bossName: bosses[0] ? bosses[0].name : null };
     setAlert(choosing ? [] : checks);
     const fresh = Object.values((s.map && s.map.nodes) || {}).filter(n => n.visited).length <= 1;
     hl += `<div class="plc-sub">${esc(R.name)}${s.nuzlockeMode ? ' · Nuzlocke' : ' · Classic'} · Mapa ${cur + 1}/${R.leaders.length + 1}${R.maps[cur] ? ' · ' + esc(R.maps[cur]) : ''}</div>`;

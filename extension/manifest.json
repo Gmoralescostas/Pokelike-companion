@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Pokelike Companion",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Panel de ayuda para pokelike.xyz. Se actualiza solo desde GitHub cada vez que abres el juego.",
   "content_scripts": [
-    { "matches": ["https://pokelike.xyz/*"], "js": ["loader.js"], "run_at": "document_idle" }
+    { "matches": ["https://pokelike.xyz/*"], "js": ["base.js"], "run_at": "document_start" },
+    { "matches": ["https://pokelike.xyz/*"], "js": ["loader.js"], "run_at": "document_idle", "world": "MAIN" }
   ],
   "web_accessible_resources": [
     { "resources": ["companion.js", "companion.css"], "matches": ["https://pokelike.xyz/*"] }
-  ],
-  "host_permissions": ["https://raw.githubusercontent.com/*"]
+  ]
 }

@@ -1,4 +1,4 @@
-/* Pokelike Companion v0.11.3 — solo lectura.
+/* Pokelike Companion v0.11.4 — solo lectura.
    Lee el estado del juego y usa sus propias funciones de cálculo.
    No hace clics ni modifica la partida. La semilla aleatoria del juego se
    guarda y se restaura alrededor de cada cálculo para no alterar los combates. */
@@ -680,6 +680,8 @@
       if (w && w.mons.length) { let a = 0, k = 0; for (let i = 0; i < 16; i++) { const r = simRun(s, team, [w.mons[Math.floor(Math.random() * w.mons.length)]], 1); if (r) { k++; a += r.pct / 100; } } if (k) wildWin = a / k; }
       const xp = routeMode === 2 ? 1.7 : 1, penalty = routeMode === 1 ? 220 : 90, BOSSW = 200, LVW = 18;
       const top3 = (() => { const t = team.map(p => p.level).sort((a, b) => b - a).slice(0, 3); return sum(t) / Math.max(1, t.length); })();
+      // Cuánto te faltará para el boss siguiente: los niveles de este mapa también cuentan para él.
+      const need2 = bosses[1] ? clamp((Math.max(...bosses[1].mons.map(m => m.level)) - 3 - top3) / 12) : 0;
       const cache = new Map();
       const info = n => {
         if (cache.has(n.id)) return cache.get(n.id);
@@ -726,7 +728,7 @@
         const big = pool.length > 90;
         if (big) pool = pool.slice(0, 60);
         let any = false;
-        const run = (c, n) => { const r = chainSim(s, team, c.path, specs, n); if (!r) return; any = true; const k = c.chain ? c.chain.n : 0; c.chain = k ? { reach: (c.chain.reach * k + r.reach * r.n) / (k + r.n), win: (c.chain.win * k + r.win * r.n) / (k + r.n), hp: (c.chain.hp * k + r.hp * r.n) / (k + r.n), size: (c.chain.size * k + r.size * r.n) / (k + r.n), lvl: (c.chain.lvl * k + r.lvl * r.n) / (k + r.n), n: k + r.n, worst: r.worst || c.chain.worst } : r; c.surv = c.chain.reach; c.score = c.v - penalty * (1 - c.chain.reach) + BOSSW * c.chain.win + LVW * (1 - c.chain.win) * Math.max(0, c.chain.lvl - top3); };
+        const run = (c, n) => { const r = chainSim(s, team, c.path, specs, n); if (!r) return; any = true; const k = c.chain ? c.chain.n : 0; c.chain = k ? { reach: (c.chain.reach * k + r.reach * r.n) / (k + r.n), win: (c.chain.win * k + r.win * r.n) / (k + r.n), hp: (c.chain.hp * k + r.hp * r.n) / (k + r.n), size: (c.chain.size * k + r.size * r.n) / (k + r.n), lvl: (c.chain.lvl * k + r.lvl * r.n) / (k + r.n), n: k + r.n, worst: r.worst || c.chain.worst } : r; c.surv = c.chain.reach; c.score = c.v - penalty * (1 - c.chain.reach) + BOSSW * c.chain.win + (LVW * (1 - c.chain.win) + 12 * need2) * Math.max(0, c.chain.lvl - top3); };
         // Pasada amplia: todos los caminos con pocas simulaciones; luego se afinan los mejores.
         pool.forEach(c => run(c, 5));
         pool.filter(c => c.chain).sort((a, b) => b.score - a.score).slice(0, 5).forEach(c => run(c, 25));
@@ -734,13 +736,14 @@
       }
       const nwm = tg(() => nodeWins(s, R, team, bosses), null);
       const options = starts.map(n => { const b = ranked.find(x => x.path[0] === n); return b ? { node: n, score: b.score, surv: b.surv, bossWin: b.chain ? b.chain.win : null, win: nwm && nwm.has(n.id) ? nwm.get(n.id) / 100 : info(n).p, fight: info(n).fight } : null; }).filter(Boolean).sort((a, b) => b.score - a.score);
-      return { best: ranked[0], options, nodes, need, hurt, free, count: paths.length };
+      return { best: ranked[0], options, nodes, need, need2, hurt, free, count: paths.length };
     });
   }
   function htmlRoute(rp) {
     const b = rp.best, first = b.path[0], side = nodeSide(first, rp.nodes), risk = Math.round((1 - b.surv) * 100);
     const why = [];
     if (rp.need > 0.3) why.push('vas bajo de nivel: prioriza combates');
+    else if (rp.need2 > 0.3) why.push('el boss siguiente te sacará nivel: aprovecha los combates de este mapa');
     if (rp.free > 0) why.push('tienes huecos: prioriza capturas');
     if (rp.hurt > 0.3) why.push('equipo tocado: valora el Centro Pokémon');
     let h = `<div class="plc-good plc-big">Ve a: ${esc(nodeName(first))}${side ? ' (' + side + ')' : ''}</div>
@@ -1302,7 +1305,7 @@
     if (sig === lastSig) return;
     lastSig = sig;
     if (sig !== memoSig) { memoSig = sig; memoMap.clear(); }
-    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.3${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
+    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.4${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
     if (missing.length) hl += `<div class="plc-warn">Compatibilidad parcial con esta versión. Falta: ${esc(missing.join(', '))}</div>`;
     if (!seedOK()) hl += '<div class="plc-warn">Cálculo de daño desactivado: no puedo proteger la semilla del juego en esta versión.</div>';
     hl += reminders.map(r => `<div class="plc-rem">${esc(r.msg)}<button data-plc-rem="${r.id}" title="Descartar">×</button></div>`).join('');

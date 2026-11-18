@@ -37,6 +37,19 @@
   const itemName = it => it ? (it.name || it.id || String(it)) : null;
 
   let memoSig = '', memoMap = new Map();
+  // Caché que sobrevive a los cambios de pantalla: solo se invalida si cambia el mapa o el equipo.
+  const persist = new Map();
+  const stableKey = s => JSON.stringify([s.runSeed, s.currentMap, s.eliteIndex,
+    Object.values((s.map && s.map.nodes) || {}).filter(n => n.visited || n.accessible).map(n => n.id + (n.visited ? 'v' : 'a')).join(),
+    (s.team || []).map(p => [p._uid, p.speciesId, p.level, p.currentHp, p.maxHp, p.moveTier, p.heldItem && (p.heldItem.id || p.heldItem)]),
+    (s.items || []).map(i => i && (i.id || i)), (s.passives || []).map(x => x && x.id)]);
+  function pmemo(name, s, fn) {
+    const k = name + '|' + stableKey(s);
+    if (persist.has(k)) return persist.get(k);
+    const v = fn();
+    if (persist.size > 40) persist.clear();
+    persist.set(k, v); return v;
+  }
   let last = null, lastSig = '';
   function memo(key, fn) {
     if (memoMap.has(key)) return memoMap.get(key);
@@ -529,7 +542,7 @@
   /* ---------- combates por nodo y simulación encadenada (desgaste y niveles) ---------- */
   // Para cada nodo de combate sin visitar: cómo generar su rival y cuántos niveles da.
   function fightSpecs(s, R, team, bosses) {
-    return memo('specs', () => {
+    return pmemo('specs', s, () => {
       const cur = s.currentMap || 0, tier = tierForMap(cur), size = cur === 0 ? 1 : cur <= 2 ? 2 : 3, out = new Map();
       const td = tg(() => trainerData(s, R, team), null), sp = tg(() => specialFights(s), null), w = tg(() => wildData(s, R, team), null);
       const pick = a => a[Math.floor(Math.random() * a.length)];
@@ -562,12 +575,12 @@
   }
   // % de victoria de cada nodo de combate con el equipo tal como está ahora.
   function nodeWins(s, R, team, bosses) {
-    return memo('nodewin', () => {
+    return pmemo('nodewin', s, () => {
       const specs = fightSpecs(s, R, team, bosses), out = new Map();
       specs.forEach((sp, id) => {
         if (sp.catchMon || sp.tutor) return;
         let w = 0, k = 0;
-        for (let i = 0; i < (sp.boss ? 40 : 14); i++) { const r = simRun(s, team, sp.enemies(), 1); if (r) { k++; w += r.pct / 100; } }
+        for (let i = 0; i < (sp.boss ? 30 : 10); i++) { const r = simRun(s, team, sp.enemies(), 1); if (r) { k++; w += r.pct / 100; } }
         if (k) out.set(id, Math.round(w / k * 100));
       });
       return out;
@@ -635,7 +648,7 @@
     return 'nº ' + (i + 1) + ' de ' + row.length;
   }
   function routePlan(s, R, team, bosses) {
-    return memo('route|' + routeMode, () => {
+    return pmemo('route' + routeMode, s, () => {
       const map = s.map;
       if (!map || !map.nodes || !Array.isArray(map.edges) || !team.length) return null;
       const nodes = map.nodes, next = {};
@@ -695,12 +708,12 @@
         const uniq = new Map(); scored.forEach(c => { const k = key(c); if (!uniq.has(k)) uniq.set(k, c); });
         let pool = [...uniq.values()];
         const big = pool.length > 90;
-        if (big) pool = pool.slice(0, 90);
+        if (big) pool = pool.slice(0, 60);
         let any = false;
         const run = (c, n) => { const r = chainSim(s, team, c.path, specs, n); if (!r) return; any = true; const k = c.chain ? c.chain.n : 0; c.chain = k ? { reach: (c.chain.reach * k + r.reach * r.n) / (k + r.n), win: (c.chain.win * k + r.win * r.n) / (k + r.n), hp: (c.chain.hp * k + r.hp * r.n) / (k + r.n), size: (c.chain.size * k + r.size * r.n) / (k + r.n), n: k + r.n, worst: r.worst || c.chain.worst } : r; c.surv = c.chain.reach; c.score = c.v - penalty * (1 - c.chain.reach) + BOSSW * c.chain.win; };
         // Pasada amplia: todos los caminos con pocas simulaciones; luego se afinan los mejores.
-        pool.forEach(c => run(c, 8));
-        pool.filter(c => c.chain).sort((a, b) => b.score - a.score).slice(0, 6).forEach(c => run(c, 32));
+        pool.forEach(c => run(c, 5));
+        pool.filter(c => c.chain).sort((a, b) => b.score - a.score).slice(0, 5).forEach(c => run(c, 25));
         if (any) ranked = pool.filter(c => c.chain).sort((a, b) => b.score - a.score);
       }
       const nwm = tg(() => nodeWins(s, R, team, bosses), null);
@@ -728,7 +741,7 @@
     return tg(() => TRAINER_BATTLE_CONFIG[key], null) || tg(() => KALOS_TRAINER_CONFIG[key], null) || tg(() => TRAINER_BATTLE_CONFIG.aceTrainer, null) || {};
   }
   function trainerData(s, R, team) {
-    return memo('trData', () => {
+    return pmemo('trData', s, () => {
       const nodes = Object.values((s.map && s.map.nodes) || {}).filter(n => n.type === 'trainer' && !n.visited);
       const cur = s.currentMap || 0, tier = tierForMap(cur), size = cur === 0 ? 1 : cur <= 2 ? 2 : 3;
       const groups = {};
@@ -785,7 +798,7 @@
   }
 
   function wildData(s, R, team) {
-    return memo('wild', () => {
+    return pmemo('wild', s, () => {
       if (!R.pool) return null;
       const cur = s.currentMap || 0, ids = withSeed(() => tg(() => R.pool(cur), null));
       if (!Array.isArray(ids) || !ids.length) return null;
@@ -1189,6 +1202,7 @@
     const sp = tg(() => specialFights(s), null);
     const nw = tg(() => nodeWins(s, R, team, bosses), null);
     const checks = tg(() => buildChecks(s, team, bosses, adv, issues, sp && sp.fights, nw), []) || [];
+    const prevRoute = last && last.route;
     last = { cd, viAdv, tdat, pdat, vp, issues, adv, sfBoss: bosses[0] ? tg(() => simFight(s, team, bosses[0]), null) : null, bossName: bosses[0] ? bosses[0].name : null };
     setAlert(choosing ? [] : checks);
     const fresh = Object.values((s.map && s.map.nodes) || {}).filter(n => n.visited).length <= 1;
@@ -1201,7 +1215,7 @@
     if (mdat && mdat.length) hl += '<h3>Megas</h3>' + tg(() => htmlMegas(mdat), '');
     hl += det('cov', 'Cobertura de tipos y tier', htmlCoverage(team) + htmlTiers(R, s));
     hl += det('log', `Registro de aciertos (${readLog().length} combates)`, tg(htmlLog, ''));
-    const rp = tg(() => routePlan(s, R, team, bosses), null);
+    const rp = choosing ? prevRoute || null : tg(() => routePlan(s, R, team, bosses), null);
     last.route = rp; last.nodeWin = nw;
     if (rp && !choosing) hr += '<h3>Ruta recomendada</h3>' + tg(() => htmlRoute(rp), '');
     const aura = bosses[0] ? tg(() => auraAdvice(s, team, bosses[0]), null) : null;

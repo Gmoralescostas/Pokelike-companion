@@ -1,4 +1,4 @@
-/* Pokelike Companion v0.11.0 — solo lectura.
+/* Pokelike Companion v0.11.1 — solo lectura.
    Lee el estado del juego y usa sus propias funciones de cálculo.
    No hace clics ni modifica la partida. La semilla aleatoria del juego se
    guarda y se restaura alrededor de cada cálculo para no alterar los combates. */
@@ -216,6 +216,9 @@
       spriteUrl: t.spriteUrl || ('img/sprites/pokemon/' + t.speciesId + '.png')
     });
   }
+  // El juego evoluciona a los rivales según el nivel del combate (resolveEvoForLevel).
+  const evoAt = (id, lv) => { const v = tg(() => resolveEvoForLevel(id, lv), id); return typeof v === 'number' && dex(v) ? v : id; };
+  const mkFoe = (id, level, tier) => mkMon(evoAt(id, level), level, tier);
   function mkMon(id, level, tier) {
     const d = dex(id);
     if (!d || !d.baseStats) return null;
@@ -561,18 +564,18 @@
           const lv = withSeed(() => tg(() => getLevelForNode(n), null)) || w.lvl;
           let ids = w.mons.map(m => m.speciesId).filter(id => tg(() => minLevelForSpecies(id), 1) <= lv); if (!ids.length) ids = w.mons.map(m => m.speciesId);
           const horde = tg(() => kalosIsHorde(n), false), hl = horde ? (withSeed(() => tg(() => kalosHordeLevel(n), null)) || lv) : lv;
-          out.set(n.id, { gain: 1, horde, enemies: () => horde ? [0, 1, 2].map(() => mkMon(pick(ids), hl, tier)).filter(Boolean) : [mkMon(pick(ids), lv, tier)].filter(Boolean) });
+          out.set(n.id, { gain: 1, horde, enemies: () => horde ? [0, 1, 2].map(() => mkFoe(pick(ids), hl, tier)).filter(Boolean) : [mkFoe(pick(ids), lv, tier)].filter(Boolean) });
         } else if (n.type === 'move_tutor') {
           out.set(n.id, { tutor: true });
         } else if (n.type === 'trainer' && td) {
           const g = td.list.find(x => x.ns.includes(n));
           if (!g || !g.mons.length) return;
           const lv = withSeed(() => tg(() => trainerFightLevel(n), null)) || g.lvl, ids = g.mons.map(m => m.speciesId);
-          out.set(n.id, { gain: 2, enemies: () => { const t = []; for (let j = 0; j < size; j++) { const m = mkMon(pick(ids), lv, tier); if (m) t.push(m); } return t; } });
+          out.set(n.id, { gain: 2, enemies: () => { const t = []; for (let j = 0; j < size; j++) { const m = mkFoe(pick(ids), lv, tier); if (m) t.push(m); } return t; } });
         } else if (n.type === 'catch' && w && w.mons.length) {
           const lv = withSeed(() => tg(() => getLevelForNode(n), null)) || w.lvl;
           let ids = w.mons.map(m => m.speciesId).filter(id => tg(() => minLevelForSpecies(id), 1) <= lv); if (!ids.length) ids = w.mons.map(m => m.speciesId);
-          out.set(n.id, { gain: 0, catchMon: () => [0, 1, 2].map(() => mkMon(pick(ids), lv, tier)).filter(Boolean).sort((a, b) => bst(b.baseStats) - bst(a.baseStats))[0] });
+          out.set(n.id, { gain: 0, catchMon: () => [0, 1, 2].map(() => mkFoe(pick(ids), lv, tier)).filter(Boolean).sort((a, b) => bst(b.baseStats) - bst(a.baseStats))[0] });
         } else if (n.type === 'boss' && bosses[0]) {
           out.set(n.id, { gain: 0, boss: true, enemies: () => bosses[0].mons });
         } else if (sp) {
@@ -769,7 +772,7 @@
         if (!ids && Array.isArray(spec) && spec.length) { ids = poolIds.filter(id => { const d = dex(id); return d && d.types.some(t => spec.includes(t)); }); src = 'del pool del mapa por tipo'; }
         if (!ids || !ids.length) { ids = poolIds; src = 'cualquiera del pool del mapa'; }
         if (lvl) { const ok = ids.filter(id => tg(() => minLevelForSpecies(id), 1) <= lvl); if (ok.length) ids = ok; }
-        const mons = lvl ? ids.map(id => mkMon(id, lvl, tier)).filter(Boolean) : [];
+        const mons = lvl ? [...new Set(ids.map(id => evoAt(id, lvl)))].map(id => mkMon(id, lvl, tier)).filter(Boolean) : [];
         const tcount = {}; mons.forEach(m => m.types.forEach(t => { tcount[t] = (tcount[t] || 0) + 1; }));
         let sc = null;
         if (seedOK() && mons.length && alive.length) {
@@ -815,7 +818,7 @@
       const wn = Object.values((s.map && s.map.nodes) || {}).filter(n => (n.type === 'battle' || n.type === 'catch') && !n.visited);
       const wl = withSeed(() => wn.map(n => tg(() => getLevelForNode(n), null))).filter(x => x != null);
       const lvl = wl.length ? Math.max(...wl) : Math.max(...team.map(p => p.level), 5), lvlLo = wl.length ? Math.min(...wl) : lvl;
-      const mons = ids.map(id => mkMon(id, lvl, tierForMap(cur))).filter(Boolean);
+      const mons = [...new Set(ids.map(id => evoAt(id, lvl)))].map(id => mkMon(id, lvl, tierForMap(cur))).filter(Boolean);
       const tc = {}; mons.forEach(m => m.types.forEach(t => { tc[t] = (tc[t] || 0) + 1; }));
       const alive = team.filter(p => p.currentHp > 0);
       let lead = [];
@@ -1041,7 +1044,7 @@
       const rows = team.map((p, i) => {
         const lv = Math.min(100, p.level + TRADE_PLUS());
         let ok = ids.filter(id => tg(() => minLevelForSpecies(id), 1) <= lv); if (!ok.length) ok = ids;
-        const g = sampleN(ok, 4).map(id => { const m = mkMon(id, lv, tier); return m ? Math.round(gainOf(teamOutlook(s, team.map((q, j) => j === i ? m : q), bosses, 30), base)) : null; }).filter(x => x != null).sort((a, b) => b - a);
+        const g = sampleN(ok, 4).map(id => { const m = mkFoe(id, lv, tier); return m ? Math.round(gainOf(teamOutlook(s, team.map((q, j) => j === i ? m : q), bosses, 30), base)) : null; }).filter(x => x != null).sort((a, b) => b - a);
         const exp = g.length ? Math.round((g[0] + (g[1] ?? g[0])) / 2) : 0;
         return { p, i, exp, lv };
       }).sort((a, b) => b.exp - a.exp);
@@ -1056,7 +1059,8 @@
       const base = baseOutlook(s, team, bosses), ids = poolIds(s, R), tier = tierForMap(s.currentMap || 0), out = team[st.idx];
       const rows = st.offers.map((o, k) => {
         const T = o._revealType || (o.types || ['Normal'])[0], lv = o.level;
-        let c = ids.filter(id => (dex(id).types || []).includes(T) && tg(() => minLevelForSpecies(id), 1) <= lv);
+        const ev = [...new Set(ids.filter(id => tg(() => minLevelForSpecies(id), 1) <= lv).map(id => evoAt(id, lv)))];
+        let c = ev.filter(id => (dex(id).types || []).includes(T));
         if (!c.length) c = ids.filter(id => (dex(id).types || []).includes(T));
         const g = sampleN(c, 5).map(id => { const m = mkMon(id, lv, tier); return m ? Math.round(gainOf(teamOutlook(s, team.map((q, j) => j === st.idx ? m : q), bosses, 30), base)) : null; }).filter(x => x != null);
         const avg = g.length ? Math.round(sum(g) / g.length) : 0, good = g.length ? Math.round(g.filter(x => x > 0).length / g.length * 100) : 0;
@@ -1293,7 +1297,7 @@
     if (sig === lastSig) return;
     lastSig = sig;
     if (sig !== memoSig) { memoSig = sig; memoMap.clear(); }
-    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.0${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
+    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.1${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
     if (missing.length) hl += `<div class="plc-warn">Compatibilidad parcial con esta versión. Falta: ${esc(missing.join(', '))}</div>`;
     if (!seedOK()) hl += '<div class="plc-warn">Cálculo de daño desactivado: no puedo proteger la semilla del juego en esta versión.</div>';
     hl += reminders.map(r => `<div class="plc-rem">${esc(r.msg)}<button data-plc-rem="${r.id}" title="Descartar">×</button></div>`).join('');

@@ -690,14 +690,17 @@
       const specs = tg(() => fightSpecs(s, R, team, bosses), null);
       let ranked = scored;
       if (specs && specs.size) {
-        const pool = scored.slice(0, 5);
-        const add = c => { if (c && !pool.includes(c)) pool.push(c); };
-        starts.forEach(n => add(scored.find(x => x.path[0] === n)));
-        // Candidatos con más combates: son los que más niveles dan antes del boss.
-        scored.slice().sort((a, b) => b.fights - a.fights || b.score - a.score).slice(0, 4).forEach(add);
-        starts.forEach(n => add(scored.filter(x => x.path[0] === n).sort((a, b) => b.fights - a.fights || b.score - a.score)[0]));
+        // Caminos distintos (por tipos de nodo de combate, captura, centro y tutor) para no simular repetidos.
+        const key = c => c.path.map(n => /battle|trainer|catch|pokecenter|move_tutor|sycamore|korrina|lysandre/.test(n.type) ? n.id : '').join(',');
+        const uniq = new Map(); scored.forEach(c => { const k = key(c); if (!uniq.has(k)) uniq.set(k, c); });
+        let pool = [...uniq.values()];
+        const big = pool.length > 90;
+        if (big) pool = pool.slice(0, 90);
         let any = false;
-        pool.forEach(c => { const r = chainSim(s, team, c.path, specs, 30); if (r) { any = true; c.chain = r; c.surv = r.reach; c.score = c.v - penalty * (1 - r.reach) + BOSSW * r.win; } });
+        const run = (c, n) => { const r = chainSim(s, team, c.path, specs, n); if (!r) return; any = true; const k = c.chain ? c.chain.n : 0; c.chain = k ? { reach: (c.chain.reach * k + r.reach * r.n) / (k + r.n), win: (c.chain.win * k + r.win * r.n) / (k + r.n), hp: (c.chain.hp * k + r.hp * r.n) / (k + r.n), size: (c.chain.size * k + r.size * r.n) / (k + r.n), n: k + r.n, worst: r.worst || c.chain.worst } : r; c.surv = c.chain.reach; c.score = c.v - penalty * (1 - c.chain.reach) + BOSSW * c.chain.win; };
+        // Pasada amplia: todos los caminos con pocas simulaciones; luego se afinan los mejores.
+        pool.forEach(c => run(c, 8));
+        pool.filter(c => c.chain).sort((a, b) => b.score - a.score).slice(0, 6).forEach(c => run(c, 32));
         if (any) ranked = pool.filter(c => c.chain).sort((a, b) => b.score - a.score);
       }
       const nwm = tg(() => nodeWins(s, R, team, bosses), null);

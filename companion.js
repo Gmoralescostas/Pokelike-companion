@@ -1,4 +1,4 @@
-/* Pokelike Companion v0.11.2 — solo lectura.
+/* Pokelike Companion v0.11.3 — solo lectura.
    Lee el estado del juego y usa sus propias funciones de cálculo.
    No hace clics ni modifica la partida. La semilla aleatoria del juego se
    guarda y se restaura alrededor de cada cálculo para no alterar los combates. */
@@ -606,7 +606,7 @@
     const rb = origRB();
     if (typeof rb !== 'function' || !seedOK() || !team.length) return null;
     const seed = _rngSeed, gs = saveG(), deaths = {};
-    let reach = 0, win = 0, ok = 0, hp = 0, tsz = 0;
+    let reach = 0, win = 0, ok = 0, hp = 0, tsz = 0, lvs = 0;
     try {
       for (let i = 0; i < n; i++) {
         _rngSeed = (Math.random() * 4294967296) >>> 0;
@@ -617,7 +617,7 @@
           if (!sp) continue;
           if (sp.catchMon) { if (T.length < TEAM_CAP) { const m = sp.catchMon(); if (m) T.push(m); } continue; }
           if (sp.tutor) { const q = T.filter(p => (p.moveTier ?? 1) < MAX_TIER).sort((a, b) => b.level - a.level)[0]; if (q) q.moveTier = (q.moveTier ?? 1) + 1; continue; }
-          if (sp.boss) { hp += sum(T.map(p => Math.max(0, p.currentHp) / Math.max(1, p.maxHp))) / T.length; tsz += T.length; }
+          if (sp.boss) { hp += sum(T.map(p => Math.max(0, p.currentHp) / Math.max(1, p.maxHp))) / T.length; tsz += T.length; const top = T.map(p => p.level).sort((a, b) => b - a).slice(0, 3); lvs += sum(top) / top.length; }
           const cfg = freshCfg(s);
           if (cfg === undefined) throw new Error('modo no soportado');
           const P = dclone(T); tg(() => P.forEach(applyMegaEvolution));
@@ -643,7 +643,7 @@
     } catch (e) { return null; } finally { _rngSeed = seed; restG(gs); }
     if (!ok) return null;
     const worst = Object.entries(deaths).sort((a, b) => b[1] - a[1])[0];
-    return { reach: reach / ok, win: win / ok, n: ok, hp: reach ? hp / reach : 0, size: reach ? tsz / reach : team.length, worst: worst ? { id: worst[0], pct: Math.round(worst[1] / ok * 100) } : null };
+    return { reach: reach / ok, win: win / ok, n: ok, hp: reach ? hp / reach : 0, size: reach ? tsz / reach : team.length, lvl: reach ? lvs / reach : 0, worst: worst ? { id: worst[0], pct: Math.round(worst[1] / ok * 100) } : null };
   }
 
   /* ---------- ruta por el mapa ---------- */
@@ -678,7 +678,8 @@
       const lag = team.some(p => mapTier != null && p.moveTier != null && p.moveTier < mapTier);
       let wildWin = 0.95;
       if (w && w.mons.length) { let a = 0, k = 0; for (let i = 0; i < 16; i++) { const r = simRun(s, team, [w.mons[Math.floor(Math.random() * w.mons.length)]], 1); if (r) { k++; a += r.pct / 100; } } if (k) wildWin = a / k; }
-      const xp = routeMode === 2 ? 1.7 : 1, penalty = routeMode === 1 ? 220 : 90, BOSSW = 200;
+      const xp = routeMode === 2 ? 1.7 : 1, penalty = routeMode === 1 ? 220 : 90, BOSSW = 200, LVW = 18;
+      const top3 = (() => { const t = team.map(p => p.level).sort((a, b) => b - a).slice(0, 3); return sum(t) / Math.max(1, t.length); })();
       const cache = new Map();
       const info = n => {
         if (cache.has(n.id)) return cache.get(n.id);
@@ -725,7 +726,7 @@
         const big = pool.length > 90;
         if (big) pool = pool.slice(0, 60);
         let any = false;
-        const run = (c, n) => { const r = chainSim(s, team, c.path, specs, n); if (!r) return; any = true; const k = c.chain ? c.chain.n : 0; c.chain = k ? { reach: (c.chain.reach * k + r.reach * r.n) / (k + r.n), win: (c.chain.win * k + r.win * r.n) / (k + r.n), hp: (c.chain.hp * k + r.hp * r.n) / (k + r.n), size: (c.chain.size * k + r.size * r.n) / (k + r.n), n: k + r.n, worst: r.worst || c.chain.worst } : r; c.surv = c.chain.reach; c.score = c.v - penalty * (1 - c.chain.reach) + BOSSW * c.chain.win; };
+        const run = (c, n) => { const r = chainSim(s, team, c.path, specs, n); if (!r) return; any = true; const k = c.chain ? c.chain.n : 0; c.chain = k ? { reach: (c.chain.reach * k + r.reach * r.n) / (k + r.n), win: (c.chain.win * k + r.win * r.n) / (k + r.n), hp: (c.chain.hp * k + r.hp * r.n) / (k + r.n), size: (c.chain.size * k + r.size * r.n) / (k + r.n), lvl: (c.chain.lvl * k + r.lvl * r.n) / (k + r.n), n: k + r.n, worst: r.worst || c.chain.worst } : r; c.surv = c.chain.reach; c.score = c.v - penalty * (1 - c.chain.reach) + BOSSW * c.chain.win + LVW * (1 - c.chain.win) * Math.max(0, c.chain.lvl - top3); };
         // Pasada amplia: todos los caminos con pocas simulaciones; luego se afinan los mejores.
         pool.forEach(c => run(c, 5));
         pool.filter(c => c.chain).sort((a, b) => b.score - a.score).slice(0, 5).forEach(c => run(c, 25));
@@ -745,7 +746,7 @@
     let h = `<div class="plc-good plc-big">Ve a: ${esc(nodeName(first))}${side ? ' (' + side + ')' : ''}</div>
       <div class="plc-sub">Después: ${b.path.slice(1).map(n => esc(nodeName(n))).join(' → ') || '—'}</div>
       <div>${b.fights} combate${b.fights === 1 ? "" : "s"} antes del boss · <span class="${risk <= 10 ? 'plc-good' : risk <= 30 ? 'plc-mid' : 'plc-bad'}">riesgo de caer por el camino ${risk}%</span></div>
-      ${b.chain ? `<div>Llegas al boss con ${Math.round(b.chain.size)} Pokémon, el ${Math.round(b.chain.hp * 100)}% de los PS, y <b class="${simCls(Math.round(b.chain.win * 100))}">le ganas el ${Math.round(b.chain.win * 100)}%</b> <span class="plc-sub">(${b.chain.n} recorridos completos, con desgaste, niveles y capturas)</span></div>${b.chain.worst && rp.nodes[b.chain.worst.id] ? `<div class="plc-warn">Punto débil: ${esc(nodeName(rp.nodes[b.chain.worst.id]))}, donde caes el ${b.chain.worst.pct}% de las veces</div>` : ''}` : ''}
+      ${b.chain ? `<div>Llegas al boss con ${Math.round(b.chain.size)} Pokémon (los 3 mejores a nv ~${Math.round(b.chain.lvl || 0)}), el ${Math.round(b.chain.hp * 100)}% de los PS, y <b class="${simCls(Math.round(b.chain.win * 100))}">le ganas el ${Math.round(b.chain.win * 100)}%</b> <span class="plc-sub">(${b.chain.n} recorridos completos, con desgaste, niveles y capturas)</span></div>${b.chain.worst && rp.nodes[b.chain.worst.id] ? `<div class="plc-warn">Punto débil: ${esc(nodeName(rp.nodes[b.chain.worst.id]))}, donde caes el ${b.chain.worst.pct}% de las veces</div>` : ''}` : ''}
       ${why.length ? `<div class="plc-sub">${esc(why.join(' · '))}</div>` : ''}
       ${b.chain && b.chain.win < 0.5 ? `<div class="plc-bad">Ningún camino te deja listo para el boss. Coge las capturas más fuertes que te ofrezcan y valora el Centro Pokémon antes de entrar.</div>` : ''}`;
     if (rp.options.length > 1) h += `<table><tr class="plc-sub"><td>Opción ahora</td><td class="plc-num">Riesgo camino</td><td class="plc-num">Boss</td></tr>${rp.options.map((o, i) => `<tr><td>${i === 0 ? '<b>' : ''}${esc(nodeName(o.node))}${nodeSide(o.node, rp.nodes) ? ' (' + nodeSide(o.node, rp.nodes) + ')' : ''}${i === 0 ? '</b>' : ''}${o.fight ? ` <span class="${simCls(Math.round(o.win * 100))}">ganas ${Math.round(o.win * 100)}%</span>` : ''}</td><td class="plc-num">${Math.round((1 - o.surv) * 100)}%</td><td class="plc-num ${o.bossWin != null ? simCls(Math.round(o.bossWin * 100)) : ''}">${o.bossWin != null ? Math.round(o.bossWin * 100) + '%' : '—'}</td></tr>`).join('')}</table>`;
@@ -992,7 +993,8 @@
       return vi.map(({ it }) => {
         const users = itemUsers(it, alive), ty = itemType(it);
         if (!users.length) return { it, b: { p: null, g: 0, sim: true, note: 'nadie de tu equipo ataca con tipo ' + ty }, rows: [] };
-        const rows = users.map(p => { const o = teamOutlook(s, team.map(q => q === p ? Object.assign({}, q, { heldItem: it }) : q), bosses, 36); return { p, gain: Math.round(gainOf(o, base)), lose: p.heldItem }; }).sort((a, b) => b.gain - a.gain);
+        const rows = users.map(p => { const o = teamOutlook(s, team.map(q => q === p ? Object.assign({}, q, { heldItem: it }) : q), bosses, 36); return { p, gain: Math.round(gainOf(o, base)), lose: p.heldItem }; })
+          .sort((a, b) => (b.gain >= 3 || a.gain >= 3 ? b.gain - a.gain : 0) || (!!a.lose - !!b.lose) || b.p.level - a.p.level);
         return { it, b: rows[0] ? { p: rows[0].p, g: rows[0].gain, sim: true, lose: rows[0].lose, note: ty ? 'potencia los ataques de tipo ' + ty : '' } : null, rows };
       });
     });
@@ -1300,7 +1302,7 @@
     if (sig === lastSig) return;
     lastSig = sig;
     if (sig !== memoSig) { memoSig = sig; memoMap.clear(); }
-    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.2${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
+    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.3${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
     if (missing.length) hl += `<div class="plc-warn">Compatibilidad parcial con esta versión. Falta: ${esc(missing.join(', '))}</div>`;
     if (!seedOK()) hl += '<div class="plc-warn">Cálculo de daño desactivado: no puedo proteger la semilla del juego en esta versión.</div>';
     hl += reminders.map(r => `<div class="plc-rem">${esc(r.msg)}<button data-plc-rem="${r.id}" title="Descartar">×</button></div>`).join('');

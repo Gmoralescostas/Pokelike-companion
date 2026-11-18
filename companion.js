@@ -1,4 +1,4 @@
-/* Pokelike Companion v0.11.5 — solo lectura.
+/* Pokelike Companion v0.11.6 — solo lectura.
    Lee el estado del juego y usa sus propias funciones de cálculo.
    No hace clics ni modifica la partida. La semilla aleatoria del juego se
    guarda y se restaura alrededor de cada cálculo para no alterar los combates. */
@@ -520,7 +520,7 @@
       const nodes = Object.values((s.map && s.map.nodes) || {}).filter(n => !n.visited), cur = s.currentMap || 0;
       const tier = tg(() => _kMoveTier(cur), tierForMap(cur)), out = [], first = t => nodes.find(n => n.type === t);
       const byId = (id, level, mega) => { const d = dex(id); return d && d.baseStats ? mkEnemy({ speciesId: id, name: d.name, types: d.types, baseStats: d.baseStats, level, mega, spriteUrl: d.spriteUrl }, tier) : null; };
-      if (first('sycamore')) out.push({ node: first('sycamore'), name: 'Profesor Ciprés', label: 'encuentro especial', tier, safe: true, note: 'Sin muerte permanente en este combate. Al ganar te regala uno de sus tres iniciales.', mons: (tg(() => SYCAMORE_TEAM, []) || []).map(t => mkEnemy(t, tier)) });
+      if (first('sycamore')) out.push({ node: first('sycamore'), name: 'Profesor Ciprés', label: 'encuentro especial', tier, safe: false, note: 'Perder aquí termina el run. Al ganar te regala uno de sus tres iniciales.', mons: (tg(() => SYCAMORE_TEAM, []) || []).map(t => mkEnemy(t, tier)) });
       if (first('korrina')) out.push({ node: first('korrina'), name: 'Korrina', label: 'encuentro especial', tier, note: 'Lleva megaevolución: los números usan los stats de la mega y son aproximados.', mons: (tg(() => KORRINA_LUCARIO_TEAM, []) || []).map(t => mkEnemy(t, tier)) });
       if (first('lysandre')) {
         const base = withSeed(() => tg(() => kalosLysandreLevel(), null));
@@ -1135,7 +1135,7 @@
       const base = tg(() => simChoice(s, team, bosses, cands), null);
       if (base && cands.every(x => x.sim)) {
         cands.sort((a, b) => b.gain - a.gain || b.sc.total - a.sc.total);
-        const best = cands[0], verdict = !team.length || (!full && best.gain >= -2) ? 'take' : full && best.gain >= 4 ? 'swap' : 'skip';
+        const best = cands[0], verdict = !team.length || !full ? 'take' : best.gain >= 4 ? 'swap' : 'skip';
         return { cands, mine, full, best, worst: best.out ? { p: best.out, sc: (mine.find(x => x.p === best.out) || {}).sc || { total: 0 } } : mine[0], verdict, base, sim: true };
       }
       const best = cands[0], worst = mine[0];
@@ -1215,7 +1215,7 @@
     c.push(lag.length ? { lv: 'warn', msg: 'Tier de ataque atrasado: ' + lag.join(', ') } : { lv: 'ok', msg: 'Tier de ataques al día' });
     if (adv && adv.boss && bosses[0]) { const sf = tg(() => simFight(s, team, bosses[0]), null); if (sf) c.unshift({ lv: sf.base.pct >= 80 ? 'ok' : sf.base.pct >= 50 ? 'warn' : 'bad', msg: `${bosses[0].name}: ganas el ${sf.base.pct}% de las simulaciones` }); }
     if (nw) Object.values((s.map && s.map.nodes) || {}).filter(n => n.accessible && !n.visited && n.type !== 'boss' && nw.has(n.id) && nw.get(n.id) < 70).forEach(n => {
-      const pct = nw.get(n.id), side = nodeSide(n, s.map.nodes), safe = n.type === 'sycamore';
+      const pct = nw.get(n.id), side = nodeSide(n, s.map.nodes), safe = false;
       c.push({ lv: pct < 50 && !safe ? 'bad' : 'warn', msg: `${pct < 50 && !safe ? 'No entres en' : 'Cuidado con'} ${nodeName(n)}${side ? ' (' + side + ')' : ''}: ganas el ${pct}%${safe ? ' (sin muerte permanente)' : ''}` });
     });
     if (nl) nl.forEach((x, id) => {
@@ -1341,7 +1341,7 @@
     if (sig === lastSig) return;
     lastSig = sig;
     if (sig !== memoSig) { memoSig = sig; memoMap.clear(); }
-    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.5${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
+    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.6${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
     if (missing.length) hl += `<div class="plc-warn">Compatibilidad parcial con esta versión. Falta: ${esc(missing.join(', '))}</div>`;
     if (!seedOK()) hl += '<div class="plc-warn">Cálculo de daño desactivado: no puedo proteger la semilla del juego en esta versión.</div>';
     hl += reminders.map(r => `<div class="plc-rem">${esc(r.msg)}<button data-plc-rem="${r.id}" title="Descartar">×</button></div>`).join('');

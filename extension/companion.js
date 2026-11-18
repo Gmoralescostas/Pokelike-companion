@@ -1,4 +1,4 @@
-/* Pokelike Companion v0.10.0 — solo lectura.
+/* Pokelike Companion v0.11.6 — solo lectura.
    Lee el estado del juego y usa sus propias funciones de cálculo.
    No hace clics ni modifica la partida. La semilla aleatoria del juego se
    guarda y se restaura alrededor de cada cálculo para no alterar los combates. */
@@ -9,6 +9,8 @@
 
   const TYPES = ['Normal', 'Fire', 'Water', 'Electric', 'Grass', 'Ice', 'Fighting', 'Poison', 'Ground', 'Flying', 'Psychic', 'Bug', 'Rock', 'Ghost', 'Dragon', 'Dark', 'Steel', 'Fairy'];
   const TEAM_CAP = 6;
+  // Visible en pantalla (también para capas fijas, donde offsetParent es null).
+  const shown = e => !!e && (e.getClientRects().length > 0 || e.offsetParent !== null) && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
   const tg = (f, d) => { try { const v = f(); return v === undefined ? d : v; } catch (e) { return d; } };
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const chip = t => `<span class="plc-t plc-t-${esc(String(t).toLowerCase())}">${esc(t)}</span>`;
@@ -37,6 +39,19 @@
   const itemName = it => it ? (it.name || it.id || String(it)) : null;
 
   let memoSig = '', memoMap = new Map();
+  // Caché que sobrevive a los cambios de pantalla: solo se invalida si cambia el mapa o el equipo.
+  const persist = new Map();
+  const stableKey = s => JSON.stringify([s.runSeed, s.currentMap, s.eliteIndex,
+    Object.values((s.map && s.map.nodes) || {}).filter(n => n.visited || n.accessible).map(n => n.id + (n.visited ? 'v' : 'a')).join(),
+    (s.team || []).map(p => [p._uid, p.speciesId, p.level, p.currentHp, p.maxHp, p.moveTier, p.heldItem && (p.heldItem.id || p.heldItem)]),
+    (s.items || []).map(i => i && (i.id || i)), (s.passives || []).map(x => x && x.id)]);
+  function pmemo(name, s, fn) {
+    const k = name + '|' + stableKey(s);
+    if (persist.has(k)) return persist.get(k);
+    const v = fn();
+    if (persist.size > 40) persist.clear();
+    persist.set(k, v); return v;
+  }
   let last = null, lastSig = '';
   function memo(key, fn) {
     if (memoMap.has(key)) return memoMap.get(key);
@@ -66,7 +81,7 @@
     let w = 0, ok = 0, faint = 0;
     try {
       for (let i = 0; i < n; i++) {
-        _rngSeed = (Math.random() * 4294967296) >>> 0;
+        _rngSeed = (extra && extra.seed != null ? (extra.seed + i * 2654435761) : Math.random() * 4294967296) >>> 0;
         const cfg = freshCfg(s, pas);
         if (cfg === undefined) break;
         const P = dclone(pTeam);
@@ -80,12 +95,13 @@
     return ok ? { pct: Math.round(w / ok * 100), n: ok, faint: faint / ok } : null;
   }
   // Probabilidad de ganar con el orden actual y con cada miembro como líder.
+  const PAIR = 91733;
   function simFight(s, team, foe) {
     return memo('sim|' + foe.name, () => {
-      const base = simRun(s, team, foe.mons, 100);
+      const base = simRun(s, team, foe.mons, 100, false, { seed: PAIR });
       if (!base) return null;
       const alive = team.filter(p => p.currentHp > 0);
-      const rows = alive.map((p, i) => i === 0 ? { p, pct: base.pct } : { p, pct: (simRun(s, [p].concat(team.filter(o => o !== p)), foe.mons, 60) || base).pct });
+      const rows = alive.map((p, i) => i === 0 ? { p, pct: base.pct } : { p, pct: (simRun(s, [p].concat(team.filter(o => o !== p)), foe.mons, 100, false, { seed: PAIR }) || base).pct });
       return { base, rows, cur: rows[0], best: rows.slice().sort((a, b) => b.pct - a.pct)[0] };
     });
   }
@@ -135,7 +151,7 @@
     return memo('aura|' + foe.name, () => {
       const ready = aurasReady();
       if (!ready.length) return null;
-      const base = simRun(s, team, foe.mons, 100);
+      const base = simRun(s, team, foe.mons, 100, false, { seed: PAIR });
       if (!base) return null;
       const alive = team.filter(p => p.currentHp > 0), out = [];
       if (ready.includes('life')) {
@@ -202,6 +218,9 @@
       spriteUrl: t.spriteUrl || ('img/sprites/pokemon/' + t.speciesId + '.png')
     });
   }
+  // El juego evoluciona a los rivales según el nivel del combate (resolveEvoForLevel).
+  const evoAt = (id, lv) => { const v = tg(() => resolveEvoForLevel(id, lv), id); return typeof v === 'number' && dex(v) ? v : id; };
+  const mkFoe = (id, level, tier) => mkMon(evoAt(id, level), level, tier);
   function mkMon(id, level, tier) {
     const d = dex(id);
     if (!d || !d.baseStats) return null;
@@ -305,7 +324,7 @@
   }
   function visibleCards() {
     const ids = ['catch-choices', 'trade-choices', 'swap-incoming', 'starter-screen'];
-    const els = window.__PLC_TEST_EL ? [window.__PLC_TEST_EL] : ids.map(i => document.getElementById(i)).filter(e => e && e.offsetParent !== null);
+    const els = window.__PLC_TEST_EL ? [window.__PLC_TEST_EL] : ids.map(i => document.getElementById(i)).filter(e => e && (window.__PLC_TEST_EL || shown(e)));
     for (const el of els) {
       const cards = [...el.querySelectorAll('.poke-card')].map(parseCard).filter(Boolean);
       if (cards.length) return { where: el.id || 'test', cards };
@@ -314,7 +333,7 @@
   }
   function visibleItems() {
     const el = document.getElementById('item-choices');
-    if (!el || el.offsetParent === null) return null;
+    if (!el || !shown(el)) return null;
     const pool = tg(() => ITEM_POOL, []) || [];
     const found = [];
     [...el.children].forEach(ch => {
@@ -338,9 +357,15 @@
       return g / Math.max(1, boss.mons.length);
     }));
   }
+  const itemType = item => { const tmap = tg(() => TYPE_ITEM_MAP, {}) || {}; return item ? Object.keys(tmap).find(t => tmap[t] === item.id) || null : null; };
+  // Objetos de tipo: solo sirven a quien ataca con ese tipo.
+  const itemUsers = (item, list) => { const ty = itemType(item); return ty ? list.filter(p => (moveOf(p) || {}).type === ty) : list; };
   function bestHolder(item, team, boss, bag) {
-    const alive = team.filter(p => p.currentHp > 0);
+    let alive = team.filter(p => p.currentHp > 0);
     if (!alive.length) return null;
+    const ty0 = itemType(item);
+    alive = itemUsers(item, alive);
+    if (!alive.length) return { p: null, g: 0, note: 'nadie de tu equipo ataca con tipo ' + ty0 };
     let rows = boss && seedOK() ? alive.map(p => ({ p, g: itemGain(p, item, boss, bag) })).sort((a, b) => b.g - a.g) : [];
     if (rows.length && rows[0].g >= 1.5) return { p: rows[0].p, g: rows[0].g, rows };
     const tmap = tg(() => TYPE_ITEM_MAP, {}) || {};
@@ -447,7 +472,8 @@
       const bag = s.items || [];
       team.filter(p => p.heldItem && typeof p.heldItem === 'object' && p.currentHp > 0).forEach(p => {
         const mine = itemGain(p, p.heldItem, boss, bag);
-        const alt = team.filter(o => o !== p && !o.heldItem && o.currentHp > 0).map(o => ({ o, g: itemGain(o, p.heldItem, boss, bag) })).sort((a, b) => b.g - a.g)[0];
+        if (itemType(p.heldItem) && (moveOf(p) || {}).type !== itemType(p.heldItem)) { const u = itemUsers(p.heldItem, team.filter(o => o !== p && o.currentHp > 0))[0]; out.push(u ? { kind: 'swap', p, o: u, item: p.heldItem, gain: 0, wrongType: true } : { kind: 'useless', p, item: p.heldItem }); return; }
+        const alt = itemUsers(p.heldItem, team.filter(o => o !== p && !o.heldItem && o.currentHp > 0)).map(o => ({ o, g: itemGain(o, p.heldItem, boss, bag) })).sort((a, b) => b.g - a.g)[0];
         if (alt && alt.g > mine * 1.3 + 3) out.push({ kind: 'swap', p, o: alt.o, item: p.heldItem, gain: alt.g - mine });
       });
       bag.filter(i => i && typeof i === 'object' && !i.usable).forEach(it => {
@@ -461,7 +487,9 @@
     const issues = itemIssues(s, team, boss);
     if (!(s.items || []).some(i => i && typeof i === 'object' && !i.usable) && !team.some(p => p.heldItem)) return '<div class="plc-sub">Sin objetos todavía.</div>';
     if (!issues.length) return '<div class="plc-good">Objetos bien repartidos para el próximo boss.</div>';
-    return issues.map(x => x.kind === 'swap'
+    return issues.map(x => x.kind === 'useless' ? `<div class="plc-warn">${esc(itemName(x.item))} en ${esc(nm(x.p))} no sirve: nadie de tu equipo ataca con tipo ${esc(itemType(x.item))}.</div>`
+      : x.kind === 'swap' && x.wrongType ? `<div class="plc-warn">${esc(itemName(x.item))} solo potencia ataques de tipo ${esc(itemType(x.item))}: pásalo de ${esc(nm(x.p))} a <b>${esc(nm(x.o))}</b>.</div>`
+      : x.kind === 'swap'
       ? `<div class="plc-warn">${esc(itemName(x.item))}: mejor en <b>${esc(nm(x.o))}</b> que en ${esc(nm(x.p))} (+${x.gain.toFixed(0)} pts)</div>`
       : `<div class="plc-warn">${esc(itemName(x.item))} sin equipar: dáselo a <b>${esc(nm(x.o))}</b>${x.gain >= 3 ? ' (+' + x.gain.toFixed(0) + ' pts)' : ''}</div>`).join('');
   }
@@ -492,7 +520,7 @@
       const nodes = Object.values((s.map && s.map.nodes) || {}).filter(n => !n.visited), cur = s.currentMap || 0;
       const tier = tg(() => _kMoveTier(cur), tierForMap(cur)), out = [], first = t => nodes.find(n => n.type === t);
       const byId = (id, level, mega) => { const d = dex(id); return d && d.baseStats ? mkEnemy({ speciesId: id, name: d.name, types: d.types, baseStats: d.baseStats, level, mega, spriteUrl: d.spriteUrl }, tier) : null; };
-      if (first('sycamore')) out.push({ node: first('sycamore'), name: 'Profesor Ciprés', label: 'encuentro especial', tier, safe: true, note: 'Sin muerte permanente en este combate. Al ganar te regala uno de sus tres iniciales.', mons: (tg(() => SYCAMORE_TEAM, []) || []).map(t => mkEnemy(t, tier)) });
+      if (first('sycamore')) out.push({ node: first('sycamore'), name: 'Profesor Ciprés', label: 'encuentro especial', tier, safe: false, note: 'Perder aquí termina el run. Al ganar te regala uno de sus tres iniciales.', mons: (tg(() => SYCAMORE_TEAM, []) || []).map(t => mkEnemy(t, tier)) });
       if (first('korrina')) out.push({ node: first('korrina'), name: 'Korrina', label: 'encuentro especial', tier, note: 'Lleva megaevolución: los números usan los stats de la mega y son aproximados.', mons: (tg(() => KORRINA_LUCARIO_TEAM, []) || []).map(t => mkEnemy(t, tier)) });
       if (first('lysandre')) {
         const base = withSeed(() => tg(() => kalosLysandreLevel(), null));
@@ -529,7 +557,7 @@
   /* ---------- combates por nodo y simulación encadenada (desgaste y niveles) ---------- */
   // Para cada nodo de combate sin visitar: cómo generar su rival y cuántos niveles da.
   function fightSpecs(s, R, team, bosses) {
-    return memo('specs', () => {
+    return pmemo('specs', s, () => {
       const cur = s.currentMap || 0, tier = tierForMap(cur), size = cur === 0 ? 1 : cur <= 2 ? 2 : 3, out = new Map();
       const td = tg(() => trainerData(s, R, team), null), sp = tg(() => specialFights(s), null), w = tg(() => wildData(s, R, team), null);
       const pick = a => a[Math.floor(Math.random() * a.length)];
@@ -538,18 +566,19 @@
           const lv = withSeed(() => tg(() => getLevelForNode(n), null)) || w.lvl;
           let ids = w.mons.map(m => m.speciesId).filter(id => tg(() => minLevelForSpecies(id), 1) <= lv); if (!ids.length) ids = w.mons.map(m => m.speciesId);
           const horde = tg(() => kalosIsHorde(n), false), hl = horde ? (withSeed(() => tg(() => kalosHordeLevel(n), null)) || lv) : lv;
-          out.set(n.id, { gain: 1, horde, enemies: () => horde ? [0, 1, 2].map(() => mkMon(pick(ids), hl, tier)).filter(Boolean) : [mkMon(pick(ids), lv, tier)].filter(Boolean) });
+          out.set(n.id, { gain: 1, horde, enemies: () => horde ? [0, 1, 2].map(() => mkFoe(pick(ids), hl, tier)).filter(Boolean) : [mkFoe(pick(ids), lv, tier)].filter(Boolean) });
         } else if (n.type === 'move_tutor') {
           out.set(n.id, { tutor: true });
         } else if (n.type === 'trainer' && td) {
           const g = td.list.find(x => x.ns.includes(n));
           if (!g || !g.mons.length) return;
           const lv = withSeed(() => tg(() => trainerFightLevel(n), null)) || g.lvl, ids = g.mons.map(m => m.speciesId);
-          out.set(n.id, { gain: 2, enemies: () => { const t = []; for (let j = 0; j < size; j++) { const m = mkMon(pick(ids), lv, tier); if (m) t.push(m); } return t; } });
+          const real = trainerSamples.get(n.id + '|' + lv);
+          out.set(n.id, { gain: 2, real: !!(real && real.length), enemies: real && real.length ? () => dclone(real[Math.floor(Math.random() * real.length)]) : () => { const t = []; for (let j = 0; j < size; j++) { const m = mkFoe(pick(ids), lv, tier); if (m) t.push(m); } return t; } });
         } else if (n.type === 'catch' && w && w.mons.length) {
           const lv = withSeed(() => tg(() => getLevelForNode(n), null)) || w.lvl;
           let ids = w.mons.map(m => m.speciesId).filter(id => tg(() => minLevelForSpecies(id), 1) <= lv); if (!ids.length) ids = w.mons.map(m => m.speciesId);
-          out.set(n.id, { gain: 0, catchMon: () => [0, 1, 2].map(() => mkMon(pick(ids), lv, tier)).filter(Boolean).sort((a, b) => bst(b.baseStats) - bst(a.baseStats))[0] });
+          out.set(n.id, { gain: 0, catchMon: () => [0, 1, 2].map(() => mkFoe(pick(ids), lv, tier)).filter(Boolean).sort((a, b) => bst(b.baseStats) - bst(a.baseStats))[0] });
         } else if (n.type === 'boss' && bosses[0]) {
           out.set(n.id, { gain: 0, boss: true, enemies: () => bosses[0].mons });
         } else if (sp) {
@@ -562,12 +591,12 @@
   }
   // % de victoria de cada nodo de combate con el equipo tal como está ahora.
   function nodeWins(s, R, team, bosses) {
-    return memo('nodewin', () => {
+    return pmemo('nodewin', s, () => {
       const specs = fightSpecs(s, R, team, bosses), out = new Map();
       specs.forEach((sp, id) => {
         if (sp.catchMon || sp.tutor) return;
         let w = 0, k = 0;
-        for (let i = 0; i < (sp.boss ? 40 : 14); i++) { const r = simRun(s, team, sp.enemies(), 1); if (r) { k++; w += r.pct / 100; } }
+        for (let i = 0; i < (sp.boss ? 30 : 10); i++) { const r = simRun(s, team, sp.enemies(), 1); if (r) { k++; w += r.pct / 100; } }
         if (k) out.set(id, Math.round(w / k * 100));
       });
       return out;
@@ -578,7 +607,7 @@
     const rb = origRB();
     if (typeof rb !== 'function' || !seedOK() || !team.length) return null;
     const seed = _rngSeed, gs = saveG(), deaths = {};
-    let reach = 0, win = 0, ok = 0, hp = 0, tsz = 0;
+    let reach = 0, win = 0, ok = 0, hp = 0, tsz = 0, lvs = 0;
     try {
       for (let i = 0; i < n; i++) {
         _rngSeed = (Math.random() * 4294967296) >>> 0;
@@ -589,7 +618,7 @@
           if (!sp) continue;
           if (sp.catchMon) { if (T.length < TEAM_CAP) { const m = sp.catchMon(); if (m) T.push(m); } continue; }
           if (sp.tutor) { const q = T.filter(p => (p.moveTier ?? 1) < MAX_TIER).sort((a, b) => b.level - a.level)[0]; if (q) q.moveTier = (q.moveTier ?? 1) + 1; continue; }
-          if (sp.boss) { hp += sum(T.map(p => Math.max(0, p.currentHp) / Math.max(1, p.maxHp))) / T.length; tsz += T.length; }
+          if (sp.boss) { hp += sum(T.map(p => Math.max(0, p.currentHp) / Math.max(1, p.maxHp))) / T.length; tsz += T.length; const top = T.map(p => p.level).sort((a, b) => b - a).slice(0, 3); lvs += sum(top) / top.length; }
           const cfg = freshCfg(s);
           if (cfg === undefined) throw new Error('modo no soportado');
           const P = dclone(T); tg(() => P.forEach(applyMegaEvolution));
@@ -615,7 +644,40 @@
     } catch (e) { return null; } finally { _rngSeed = seed; restG(gs); }
     if (!ok) return null;
     const worst = Object.entries(deaths).sort((a, b) => b[1] - a[1])[0];
-    return { reach: reach / ok, win: win / ok, n: ok, hp: reach ? hp / reach : 0, size: reach ? tsz / reach : team.length, worst: worst ? { id: worst[0], pct: Math.round(worst[1] / ok * 100) } : null };
+    return { reach: reach / ok, win: win / ok, n: ok, hp: reach ? hp / reach : 0, size: reach ? tsz / reach : team.length, lvl: reach ? lvs / reach : 0, worst: worst ? { id: worst[0], pct: Math.round(worst[1] / ok * 100) } : null };
+  }
+
+
+  /* ---------- equipos reales de entrenadores ---------- */
+  // Usa la función del juego que genera los equipos (trainerTeamSpecies) con semillas propias,
+  // y restaura la semilla del juego al terminar cada muestra.
+  const trainerSamples = new Map();
+  let sampling = false;
+  async function sampleTrainers() {
+    const s = getState(), ms = document.getElementById('map-screen');
+    if (sampling || !s || !s.map || !ms || !shown(ms) || typeof trainerTeamSpecies !== 'function' || !seedOK()) return;
+    const nodes = Object.values(s.map.nodes).filter(n => n.type === 'trainer' && !n.visited);
+    const cur = s.currentMap || 0, size = cur === 0 ? 1 : cur <= 2 ? 2 : 3, tier = tierForMap(cur);
+    const todo = nodes.map(n => ({ n, lv: withSeed(() => tg(() => trainerFightLevel(n), null)) })).filter(x => x.lv && !trainerSamples.has(x.n.id + '|' + x.lv));
+    if (!todo.length) return;
+    sampling = true;
+    try {
+      for (const { n, lv } of todo) {
+        const key = n.trainerSprite || 'aceTrainer', cfg = trainerCfg(key), teams = [];
+        for (let i = 0; i < 6; i++) {
+          const saved = _rngSeed;
+          try {
+            _rngSeed = (PAIR * 7 + i * 2654435761 + n.layer * 97) >>> 0;
+            const sp = await trainerTeamSpecies(key, cfg, lv, size);
+            const team = (sp || []).map(x => tg(() => createInstance(x, lv, false, tier), null)).filter(Boolean);
+            if (team.length) teams.push(team);
+          } catch (e) { } finally { _rngSeed = saved; }
+        }
+        trainerSamples.set(n.id + '|' + lv, teams);
+      }
+      [...persist.keys()].filter(k => /^(specs|nodewin|nodelead|route)/.test(k)).forEach(k => persist.delete(k));
+      lastSig = '';
+    } finally { sampling = false; }
   }
 
   /* ---------- ruta por el mapa ---------- */
@@ -635,7 +697,7 @@
     return 'nº ' + (i + 1) + ' de ' + row.length;
   }
   function routePlan(s, R, team, bosses) {
-    return memo('route|' + routeMode, () => {
+    return pmemo('route' + routeMode, s, () => {
       const map = s.map;
       if (!map || !map.nodes || !Array.isArray(map.edges) || !team.length) return null;
       const nodes = map.nodes, next = {};
@@ -650,7 +712,13 @@
       const lag = team.some(p => mapTier != null && p.moveTier != null && p.moveTier < mapTier);
       let wildWin = 0.95;
       if (w && w.mons.length) { let a = 0, k = 0; for (let i = 0; i < 16; i++) { const r = simRun(s, team, [w.mons[Math.floor(Math.random() * w.mons.length)]], 1); if (r) { k++; a += r.pct / 100; } } if (k) wildWin = a / k; }
-      const xp = routeMode === 2 ? 1.7 : 1, penalty = routeMode === 1 ? 220 : 90, BOSSW = 200;
+      const xp = routeMode === 2 ? 1.7 : 1, penalty = routeMode === 1 ? 220 : 90, BOSSW = 200, LVW = 18;
+      const top3 = (() => { const t = team.map(p => p.level).sort((a, b) => b - a).slice(0, 3); return sum(t) / Math.max(1, t.length); })();
+      // Cuánto te faltará para el boss siguiente: los niveles de este mapa también cuentan para él.
+      const need2 = bosses[1] ? clamp((Math.max(...bosses[1].mons.map(m => m.level)) - 3 - top3) / 12) : 0;
+      // Si llegas sin respuesta a un muro (p. ej. Grant), las capturas valen más según lo probable que sea que salga un counter.
+      const wp = tg(() => wallPlan(s, R, team, bosses), null), poolN = Math.max(1, (tg(() => poolIds(s, R), []) || []).length);
+      const ctr = wp && wp.good.length ? (1 - Math.pow(1 - wp.good.length / poolN, 3)) * (1 - wp.pctNow / 100) : 0;
       const cache = new Map();
       const info = n => {
         if (cache.has(n.id)) return cache.get(n.id);
@@ -658,7 +726,7 @@
         switch (n.type) {
           case 'battle': v = (4 + 8 * need) * xp * (tg(() => kalosIsHorde(n), false) ? 1.5 : 1); p = wildWin; fight = true; break;
           case 'trainer': { const g = td && td.list.find(x => x.ns.includes(n)); v = (6 + 10 * need) * xp; p = g && g.win != null ? g.win / 100 : 0.9; fight = true; break; }
-          case 'catch': v = free > 0 ? 12 + 4 * Math.min(3, free) : 4; break;
+          case 'catch': v = (free > 0 ? 12 + 4 * Math.min(3, free) : 4) + 70 * ctr; break;
           case 'item': v = 8; break;
           case 'pokecenter': v = 2 + 14 * hurt; break;
           case 'move_tutor': v = team.some(p => (p.moveTier ?? 1) < MAX_TIER) ? (lag ? 12 : 9) : 1; break;
@@ -666,7 +734,7 @@
           case 'korrina': case 'lysandre': { const f = sp && sp.fights.find(x => x.node === n), sf = f ? tg(() => simFight(s, team, f), null) : null; v = 10; p = sf ? sf.base.pct / 100 : 0.7; fight = true; break; }
           case 'legendary': case 'masterball': v = 10; p = 0.8; fight = true; break;
           case 'question': v = 5; break;
-          case 'trade': v = 3; break;
+          case 'trade': v = 3 + 25 * ctr; break;
           case 'boss': v = 0; break;
         }
         const r = { v, p, fight }; cache.set(n.id, r); return r;
@@ -690,31 +758,36 @@
       const specs = tg(() => fightSpecs(s, R, team, bosses), null);
       let ranked = scored;
       if (specs && specs.size) {
-        const pool = scored.slice(0, 5);
-        const add = c => { if (c && !pool.includes(c)) pool.push(c); };
-        starts.forEach(n => add(scored.find(x => x.path[0] === n)));
-        // Candidatos con más combates: son los que más niveles dan antes del boss.
-        scored.slice().sort((a, b) => b.fights - a.fights || b.score - a.score).slice(0, 4).forEach(add);
-        starts.forEach(n => add(scored.filter(x => x.path[0] === n).sort((a, b) => b.fights - a.fights || b.score - a.score)[0]));
+        // Caminos distintos (por tipos de nodo de combate, captura, centro y tutor) para no simular repetidos.
+        const key = c => c.path.map(n => /battle|trainer|catch|pokecenter|move_tutor|sycamore|korrina|lysandre/.test(n.type) ? n.id : '').join(',');
+        const uniq = new Map(); scored.forEach(c => { const k = key(c); if (!uniq.has(k)) uniq.set(k, c); });
+        let pool = [...uniq.values()];
+        const big = pool.length > 90;
+        if (big) pool = pool.slice(0, 60);
         let any = false;
-        pool.forEach(c => { const r = chainSim(s, team, c.path, specs, 30); if (r) { any = true; c.chain = r; c.surv = r.reach; c.score = c.v - penalty * (1 - r.reach) + BOSSW * r.win; } });
+        const run = (c, n) => { const r = chainSim(s, team, c.path, specs, n); if (!r) return; any = true; const k = c.chain ? c.chain.n : 0; c.chain = k ? { reach: (c.chain.reach * k + r.reach * r.n) / (k + r.n), win: (c.chain.win * k + r.win * r.n) / (k + r.n), hp: (c.chain.hp * k + r.hp * r.n) / (k + r.n), size: (c.chain.size * k + r.size * r.n) / (k + r.n), lvl: (c.chain.lvl * k + r.lvl * r.n) / (k + r.n), n: k + r.n, worst: r.worst || c.chain.worst } : r; c.surv = c.chain.reach; c.score = c.v - penalty * (1 - c.chain.reach) + BOSSW * c.chain.win + (LVW * (1 - c.chain.win) + 12 * need2) * Math.max(0, c.chain.lvl - top3); };
+        // Pasada amplia: todos los caminos con pocas simulaciones; luego se afinan los mejores.
+        pool.forEach(c => run(c, 5));
+        pool.filter(c => c.chain).sort((a, b) => b.score - a.score).slice(0, 5).forEach(c => run(c, 25));
         if (any) ranked = pool.filter(c => c.chain).sort((a, b) => b.score - a.score);
       }
       const nwm = tg(() => nodeWins(s, R, team, bosses), null);
       const options = starts.map(n => { const b = ranked.find(x => x.path[0] === n); return b ? { node: n, score: b.score, surv: b.surv, bossWin: b.chain ? b.chain.win : null, win: nwm && nwm.has(n.id) ? nwm.get(n.id) / 100 : info(n).p, fight: info(n).fight } : null; }).filter(Boolean).sort((a, b) => b.score - a.score);
-      return { best: ranked[0], options, nodes, need, hurt, free, count: paths.length };
+      return { best: ranked[0], options, nodes, need, need2, hurt, free, ctr, wall: wp, count: paths.length };
     });
   }
   function htmlRoute(rp) {
     const b = rp.best, first = b.path[0], side = nodeSide(first, rp.nodes), risk = Math.round((1 - b.surv) * 100);
     const why = [];
     if (rp.need > 0.3) why.push('vas bajo de nivel: prioriza combates');
-    if (rp.free > 0) why.push('tienes huecos: prioriza capturas');
+    else if (rp.need2 > 0.3) why.push('el boss siguiente te sacará nivel: aprovecha los combates de este mapa');
+    if (rp.ctr > 0.15 && rp.wall) why.push('busca un counter para ' + rp.wall.wall.name + ': las capturas valen más');
+    else if (rp.free > 0) why.push('tienes huecos: prioriza capturas');
     if (rp.hurt > 0.3) why.push('equipo tocado: valora el Centro Pokémon');
     let h = `<div class="plc-good plc-big">Ve a: ${esc(nodeName(first))}${side ? ' (' + side + ')' : ''}</div>
       <div class="plc-sub">Después: ${b.path.slice(1).map(n => esc(nodeName(n))).join(' → ') || '—'}</div>
       <div>${b.fights} combate${b.fights === 1 ? "" : "s"} antes del boss · <span class="${risk <= 10 ? 'plc-good' : risk <= 30 ? 'plc-mid' : 'plc-bad'}">riesgo de caer por el camino ${risk}%</span></div>
-      ${b.chain ? `<div>Llegas al boss con ${Math.round(b.chain.size)} Pokémon, el ${Math.round(b.chain.hp * 100)}% de los PS, y <b class="${simCls(Math.round(b.chain.win * 100))}">le ganas el ${Math.round(b.chain.win * 100)}%</b> <span class="plc-sub">(${b.chain.n} recorridos completos, con desgaste, niveles y capturas)</span></div>${b.chain.worst && rp.nodes[b.chain.worst.id] ? `<div class="plc-warn">Punto débil: ${esc(nodeName(rp.nodes[b.chain.worst.id]))}, donde caes el ${b.chain.worst.pct}% de las veces</div>` : ''}` : ''}
+      ${b.chain ? `<div>Llegas al boss con ${Math.round(b.chain.size)} Pokémon (los 3 mejores a nv ~${Math.round(b.chain.lvl || 0)}), el ${Math.round(b.chain.hp * 100)}% de los PS, y <b class="${simCls(Math.round(b.chain.win * 100))}">le ganas el ${Math.round(b.chain.win * 100)}%</b> <span class="plc-sub">(${b.chain.n} recorridos completos, con desgaste, niveles y capturas)</span></div>${b.chain.worst && rp.nodes[b.chain.worst.id] ? `<div class="plc-warn">Punto débil: ${esc(nodeName(rp.nodes[b.chain.worst.id]))}, donde caes el ${b.chain.worst.pct}% de las veces</div>` : ''}` : ''}
       ${why.length ? `<div class="plc-sub">${esc(why.join(' · '))}</div>` : ''}
       ${b.chain && b.chain.win < 0.5 ? `<div class="plc-bad">Ningún camino te deja listo para el boss. Coge las capturas más fuertes que te ofrezcan y valora el Centro Pokémon antes de entrar.</div>` : ''}`;
     if (rp.options.length > 1) h += `<table><tr class="plc-sub"><td>Opción ahora</td><td class="plc-num">Riesgo camino</td><td class="plc-num">Boss</td></tr>${rp.options.map((o, i) => `<tr><td>${i === 0 ? '<b>' : ''}${esc(nodeName(o.node))}${nodeSide(o.node, rp.nodes) ? ' (' + nodeSide(o.node, rp.nodes) + ')' : ''}${i === 0 ? '</b>' : ''}${o.fight ? ` <span class="${simCls(Math.round(o.win * 100))}">ganas ${Math.round(o.win * 100)}%</span>` : ''}</td><td class="plc-num">${Math.round((1 - o.surv) * 100)}%</td><td class="plc-num ${o.bossWin != null ? simCls(Math.round(o.bossWin * 100)) : ''}">${o.bossWin != null ? Math.round(o.bossWin * 100) + '%' : '—'}</td></tr>`).join('')}</table>`;
@@ -725,7 +798,7 @@
     return tg(() => TRAINER_BATTLE_CONFIG[key], null) || tg(() => KALOS_TRAINER_CONFIG[key], null) || tg(() => TRAINER_BATTLE_CONFIG.aceTrainer, null) || {};
   }
   function trainerData(s, R, team) {
-    return memo('trData', () => {
+    return pmemo('trData', s, () => {
       const nodes = Object.values((s.map && s.map.nodes) || {}).filter(n => n.type === 'trainer' && !n.visited);
       const cur = s.currentMap || 0, tier = tierForMap(cur), size = cur === 0 ? 1 : cur <= 2 ? 2 : 3;
       const groups = {};
@@ -743,7 +816,7 @@
         if (!ids && Array.isArray(spec) && spec.length) { ids = poolIds.filter(id => { const d = dex(id); return d && d.types.some(t => spec.includes(t)); }); src = 'del pool del mapa por tipo'; }
         if (!ids || !ids.length) { ids = poolIds; src = 'cualquiera del pool del mapa'; }
         if (lvl) { const ok = ids.filter(id => tg(() => minLevelForSpecies(id), 1) <= lvl); if (ok.length) ids = ok; }
-        const mons = lvl ? ids.map(id => mkMon(id, lvl, tier)).filter(Boolean) : [];
+        const mons = lvl ? [...new Set(ids.map(id => evoAt(id, lvl)))].map(id => mkMon(id, lvl, tier)).filter(Boolean) : [];
         const tcount = {}; mons.forEach(m => m.types.forEach(t => { tcount[t] = (tcount[t] || 0) + 1; }));
         let sc = null;
         if (seedOK() && mons.length && alive.length) {
@@ -782,14 +855,14 @@
   }
 
   function wildData(s, R, team) {
-    return memo('wild', () => {
+    return pmemo('wild', s, () => {
       if (!R.pool) return null;
       const cur = s.currentMap || 0, ids = withSeed(() => tg(() => R.pool(cur), null));
       if (!Array.isArray(ids) || !ids.length) return null;
       const wn = Object.values((s.map && s.map.nodes) || {}).filter(n => (n.type === 'battle' || n.type === 'catch') && !n.visited);
       const wl = withSeed(() => wn.map(n => tg(() => getLevelForNode(n), null))).filter(x => x != null);
       const lvl = wl.length ? Math.max(...wl) : Math.max(...team.map(p => p.level), 5), lvlLo = wl.length ? Math.min(...wl) : lvl;
-      const mons = ids.map(id => mkMon(id, lvl, tierForMap(cur))).filter(Boolean);
+      const mons = [...new Set(ids.map(id => evoAt(id, lvl)))].map(id => mkMon(id, lvl, tierForMap(cur))).filter(Boolean);
       const tc = {}; mons.forEach(m => m.types.forEach(t => { tc[t] = (tc[t] || 0) + 1; }));
       const alive = team.filter(p => p.currentHp > 0);
       let lead = [];
@@ -797,12 +870,35 @@
       return { mons, lvl, lvlLo, tc, lead, left: wn.length };
     });
   }
+
+  // Líder por cada combate salvaje: según las especies que pueden salir en ese nodo y a su nivel.
+  function nodeLeads(s, R, team, bosses) {
+    return pmemo('nodelead', s, () => {
+      const specs = tg(() => fightSpecs(s, R, team, bosses), null), out = new Map();
+      const alive = team.filter(p => p.currentHp > 0);
+      if (!specs || alive.length < 2) return out;
+      Object.values((s.map && s.map.nodes) || {}).filter(n => n.accessible && !n.visited && (n.type === 'battle' || n.type === 'trainer')).forEach(n => {
+        const sp = specs.get(n.id);
+        if (!sp || !sp.enemies) return;
+        const foes = []; for (let i = 0; i < 10; i++) foes.push(sp.enemies());
+        const rows = alive.map(p => {
+          const order = [p].concat(team.filter(o => o !== p));
+          let w = 0, k = 0, hp = 0;
+          foes.forEach((E, i) => { const r = simRun(s, order, E, 1, false, { seed: PAIR + i * 17 }); if (r) { k++; w += r.pct / 100; } });
+          return { p, pct: k ? Math.round(w / k * 100) : 0 };
+        }).sort((a, b) => b.pct - a.pct);
+        const cur = rows.find(r => r.p === alive[0]) || rows[0];
+        out.set(n.id, { best: rows[0], cur, rows });
+      });
+      return out;
+    });
+  }
   function htmlGrass(s, R, team) {
     const w = wildData(s, R, team);
     if (!w) return '<div class="plc-sub">No disponible para este mapa.</div>';
     const n = w.mons.length;
     return `<div class="plc-sub">nv ${w.lvlLo < w.lvl ? w.lvlLo + '–' + w.lvl : w.lvl} · ${n} especies, ${(100 / n).toFixed(1)}% cada una</div>
-      ${w.lead.length ? `<div>Lidera con <b>${esc(nm(w.lead[0].p))}</b> <span class="${w.lead[0].pct >= 70 ? 'plc-good' : w.lead[0].pct >= 40 ? 'plc-mid' : 'plc-bad'}">gana ${w.lead[0].pct}% de los duelos</span></div>` : ''}
+      ${(() => { const nl = last && last.nodeLead; const acc = nl && nl.forEach ? [...nl.entries()].filter(([id]) => s.map.nodes[id] && s.map.nodes[id].type === 'battle') : []; return acc.length ? acc.map(([id, x]) => `<div>${esc(nodeName(s.map.nodes[id]))}${nodeSide(s.map.nodes[id], s.map.nodes) ? ' (' + nodeSide(s.map.nodes[id], s.map.nodes) + ')' : ''}: lidera con <b>${esc(nm(x.best.p))}</b> <span class="${simCls(x.best.pct)}">${x.best.pct}%</span>${x.best.p !== x.cur.p ? ` <span class="plc-sub">(con ${esc(nm(x.cur.p))}: ${x.cur.pct}%)</span>` : ''}</div>`).join('') : (w.lead.length ? `<div>Lidera con <b>${esc(nm(w.lead[0].p))}</b> <span class="${w.lead[0].pct >= 70 ? 'plc-good' : w.lead[0].pct >= 40 ? 'plc-mid' : 'plc-bad'}">gana ${w.lead[0].pct}% de los duelos</span></div>` : ''); })()}
       <div>${Object.entries(w.tc).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t, c]) => chip(t) + `<span class="plc-sub">${Math.round(c / n * 100)}%</span> `).join('')}</div>
       ${det('grass', 'Ver especies', `<div class="plc-sub">${w.mons.map(m => esc(m.name)).join(', ')}</div>`)}`;
   }
@@ -842,19 +938,24 @@
   }
   // % de victoria del equipo contra el próximo boss (tal como estás) y contra los dos siguientes (a su nivel, con evoluciones).
   function teamOutlook(s, team, bosses, n, extra) {
+    extra = Object.assign({ seed: PAIR }, extra || {});
+    if (!team.length) return { next: 0, fut: bosses.length > 1 ? 0 : null, low: 0, lowName: null };
     // Próximo boss: al nivel con el que sueles llegar (3 por debajo de su máximo, o el tuyo si ya vas por encima).
     const b0 = bosses[0], lv0 = b0 ? Math.max(...b0.mons.map(m => m.level)) - 3 : 0;
     const r0 = b0 ? simRun(s, team.map(p => p.level >= lv0 ? p : grownTo(p, lv0, 0)), b0.mons, n, false, extra) : null;
     const fut = bosses.slice(1, 3).map(b => {
       const lv = Math.max(...b.mons.map(m => m.level)) - 2;
       const r = simRun(s, team.map(p => grownTo(p, lv, b.tier)), b.mons, Math.ceil(n / 2), false, extra);
-      return r ? r.pct : null;
-    }).filter(x => x != null);
-    return { next: r0 ? r0.pct : null, fut: fut.length ? Math.round(sum(fut) / fut.length) : null };
+      return r ? { b, pct: r.pct } : null;
+    }).filter(Boolean);
+    // El "muro": el jefe más difícil de los tres próximos.
+    const all = (r0 ? [{ b: b0, pct: r0.pct }] : []).concat(fut), lo = all.length ? all.reduce((a, x) => x.pct < a.pct ? x : a) : null;
+    return { next: r0 ? r0.pct : null, fut: fut.length ? Math.round(sum(fut.map(x => x.pct)) / fut.length) : null, low: lo ? lo.pct : null, lowName: lo ? lo.b.name : null };
   }
-  const gainOf = (o, b) => 0.6 * ((o.next ?? 0) - (b.next ?? 0)) + 0.4 * ((o.fut ?? 0) - (b.fut ?? 0));
+  // 45% próximo boss, 30% media de los dos siguientes, 25% el más difícil de los tres (para no llegar sin respuesta a un muro como Grant).
+  const gainOf = (o, b) => 0.45 * ((o.next ?? 0) - (b.next ?? 0)) + 0.3 * ((o.fut ?? 0) - (b.fut ?? 0)) + 0.25 * ((o.low ?? 0) - (b.low ?? 0));
   function simChoice(s, team, bosses, cands) {
-    if (!seedOK() || !bosses.length || !team.length || typeof origRB() !== 'function') return null;
+    if (!seedOK() || !bosses.length || typeof origRB() !== 'function') return null;
     const base = teamOutlook(s, team, bosses, 80);
     if (base.next == null) return null;
     const full = team.length >= TEAM_CAP;
@@ -870,6 +971,47 @@
     return base;
   }
 
+
+  /* ---------- plan contra el muro (p. ej. Grant en Kalos) ---------- */
+  // Busca el jefe más difícil de los tres próximos y qué especies del mapa actual le dan respuesta.
+  function wallPlan(s, R, team, bosses) {
+    return pmemo('wall', s, () => {
+      if (!canSim(s, team, bosses) || bosses.length < 2) return null;
+      const base = baseOutlook(s, team, bosses);
+      if (base.low == null || base.low >= 50) return null;
+      const wi = bosses.slice(0, 3).findIndex(b => b.name === base.lowName), wall = bosses[wi];
+      if (!wall || wi === 0) return null; // si el muro es el próximo boss ya lo cubre el resto del panel
+      const lv = Math.max(...wall.mons.map(m => m.level)) - 2, tier = tierForMap(s.currentMap || 0);
+      const grown = team.map(p => grownTo(p, lv, wall.tier));
+      const now = simRun(s, grown, wall.mons, 24, false, { seed: PAIR });
+      const full = team.length >= TEAM_CAP;
+      const ids = [...new Set(poolIds(s, R))];
+      const rows = ids.map(id => {
+        const m = mkMon(id, 5, tier); if (!m) return null;
+        const g = grownTo(m, lv, wall.tier);
+        let best = null;
+        const tries = full ? team.map((q, j) => grown.map((x, k) => k === j ? g : x)) : [grown.concat(g)];
+        tries.forEach(t => { const r = simRun(s, t, wall.mons, 16, false, { seed: PAIR }); if (r && (!best || r.pct > best)) best = r.pct; });
+        return best == null ? null : { id, name: m.name, types: m.types, pct: best };
+      }).filter(Boolean).sort((a, b) => b.pct - a.pct);
+      const nodes = Object.values((s.map && s.map.nodes) || {});
+      const catchesLeft = nodes.filter(n => !n.visited && (n.type === 'catch' || n.type === 'trade')).length;
+      const pctNow = now ? now.pct : base.low;
+      const good = rows.filter(r => r.pct >= Math.max(40, pctNow + 25));
+      const reset = (s.currentMap || 0) === 0 && wi === 1 && pctNow < 20 && catchesLeft === 0 && good.length > 0;
+      return { wall, lv, pctNow, rows, good, catchesLeft, reset, wi };
+    });
+  }
+  function htmlWall(wp) {
+    if (!wp) return '';
+    let h = `<div class="${wp.pctNow < 20 ? 'plc-bad' : 'plc-mid'} plc-big">${esc(wp.wall.name)}: le ganas el ${wp.pctNow}% con tu equipo actual</div>`;
+    h += `<div class="plc-sub">Simulado a nv ~${wp.lv}, con evoluciones. ${wp.wall.mons.map(m => esc(m.name)).join(', ')}</div>`;
+    if (wp.reset) h += `<div class="plc-bad plc-big">Te conviene resetear el run ahora: ya no quedan capturas en este mapa y llegas a ${esc(wp.wall.name)} sin respuesta. Reiniciar ahora cuesta poco.</div>`;
+    if (wp.good.length) h += `<div>Lo que le da respuesta y puede salir en este mapa (${wp.catchesLeft} captura${wp.catchesLeft === 1 ? '' : 's'}/intercambio${wp.catchesLeft === 1 ? '' : 's'} sin hacer):</div>`;
+    else h += '<div class="plc-sub">Ninguna especie de este mapa cambia mucho ese combate: toca subir nivel y tier.</div>';
+    h += `<table>${wp.rows.slice(0, 6).map(r => `<tr><td><b>${esc(r.name)}</b> ${chips(r.types)}</td><td class="plc-num"><b class="${simCls(r.pct)}">${r.pct}%</b></td></tr>`).join('')}</table>`;
+    return h + '<div class="plc-sub">% contra ese jefe si añades la especie a tu equipo (o la cambias por quien menos aporta), simulado con el motor del juego.</div>';
+  }
 
   /* ---------- tutor de ataques, pasivas, objetos y megas (por simulación) ---------- */
   const MAX_TIER = 2;
@@ -894,18 +1036,18 @@
   }
   function visibleTutor() {
     const m = document.getElementById('item-equip-modal');
-    return m && m.offsetParent !== null && m.querySelector('#btn-skip-tutor') ? m : null;
+    return m && shown(m) && m.querySelector('#btn-skip-tutor') ? m : null;
   }
   function htmlTutor(td) {
     if (!td) return '';
     let h = td.best ? `<div class="plc-good plc-big">Enséñaselo a ${esc(nm(td.best.p))} (${sgn(td.best.gain)} pts)</div>` : '<div class="plc-sub">Todo tu equipo tiene ya el ataque al máximo.</div>';
     h += `<table>${td.rows.map(r => r.maxed ? `<tr><td>${esc(nm(r.p))}</td><td class="plc-sub">ya al máximo</td><td></td></tr>` : `<tr><td><b>${esc(nm(r.p))}</b></td><td class="plc-sub">${r.from ? esc(r.from.name) + ' ' + r.from.power : ''} → ${r.to ? esc(r.to.name) + ' ' + r.to.power : ''}<br>Boss ${r.o.next ?? '—'}%${r.o.fut != null ? ' · siguientes ' + r.o.fut + '%' : ''}</td><td class="plc-num"><b class="${r.gain >= 4 ? 'plc-good' : ''}">${sgn(r.gain)}</b></td></tr>`).join('')}</table>`;
-    return h + '<div class="plc-sub">Puntos: cuánto sube tu % de victoria (60% próximo boss, 40% los dos siguientes), simulado con el motor del juego.</div>';
+    return h + '<div class="plc-sub">Puntos: cuánto sube tu % de victoria (45% próximo boss, 30% los dos siguientes, 25% el más difícil de los tres), simulado con el motor del juego.</div>';
   }
   // Pasivas ofrecidas en pantalla.
   function visiblePassives() {
     const el = document.getElementById('passive-choices'), sc = document.getElementById('passive-screen');
-    if (!el || !sc || sc.offsetParent === null) return null;
+    if (!el || !sc || !shown(sc)) return null;
     const pool = tg(() => PASSIVE_ITEM_POOL, []) || [], found = [];
     [...el.children].forEach(ch => {
       const txt = ch.textContent || '';
@@ -935,8 +1077,11 @@
       if (!canSim(s, team, bosses)) return null;
       const base = baseOutlook(s, team, bosses), alive = team.filter(p => p.currentHp > 0);
       return vi.map(({ it }) => {
-        const rows = alive.map(p => { const o = teamOutlook(s, team.map(q => q === p ? Object.assign({}, q, { heldItem: it }) : q), bosses, 36); return { p, gain: Math.round(gainOf(o, base)), lose: p.heldItem }; }).sort((a, b) => b.gain - a.gain);
-        return { it, b: rows[0] ? { p: rows[0].p, g: rows[0].gain, sim: true, lose: rows[0].lose } : null, rows };
+        const users = itemUsers(it, alive), ty = itemType(it);
+        if (!users.length) return { it, b: { p: null, g: 0, sim: true, note: 'nadie de tu equipo ataca con tipo ' + ty }, rows: [] };
+        const rows = users.map(p => { const o = teamOutlook(s, team.map(q => q === p ? Object.assign({}, q, { heldItem: it }) : q), bosses, 36); return { p, gain: Math.round(gainOf(o, base)), lose: p.heldItem }; })
+          .sort((a, b) => (b.gain >= 3 || a.gain >= 3 ? b.gain - a.gain : 0) || (!!a.lose - !!b.lose) || b.p.level - a.p.level);
+        return { it, b: rows[0] ? { p: rows[0].p, g: rows[0].gain, sim: true, lose: rows[0].lose, note: ty ? 'potencia los ataques de tipo ' + ty : '' } : null, rows };
       });
     });
   }
@@ -948,12 +1093,13 @@
         const st = tg(() => getOwnedMegaStoneForLine(p.speciesId), null);
         if (!st) return;
         const held = p.heldItem && p.heldItem.isMegaStone && p.heldItem.id === st.id;
+        const wrongHolder = !held && team.some(q => q !== p && q.heldItem && q.heldItem.isMegaStone && q.heldItem.id === st.id);
         const item = tg(() => makeMegaStoneItem(st), null);
         const ready = item && item.megaSpecies === p.speciesId;
         let gain = null;
         if (ready && !held && canSim(s, team, bosses)) gain = Math.round(gainOf(teamOutlook(s, team.map(q => q === p ? Object.assign({}, q, { heldItem: item }) : q), bosses, 50), baseOutlook(s, team, bosses)));
         const need = !ready ? tg(() => dex(st.species).name, null) : null;
-        out.push({ p, st, held, ready, gain, need });
+        out.push({ p, st, held, ready, gain, need, wrongHolder });
       });
       return out;
     });
@@ -965,6 +1111,70 @@
         : `<div class="${m.gain != null && m.gain >= 4 ? 'plc-warn' : 'plc-sub'}">${esc(m.st.name)} disponible para ${esc(nm(m.p))}${m.gain != null ? ': ' + sgn(m.gain) + ' pts' : ''}${m.p.heldItem ? ' (dejaría ' + esc(itemName(m.p.heldItem)) + ')' : ''}.</div>`).join('');
   }
 
+  /* ---------- intercambios ---------- */
+  // El juego oculta qué Pokémon hay en cada oferta: solo enseña un tipo y el nivel.
+  // La recomendación usa solo eso (no lee la especie oculta).
+  const TRADE_PLUS = () => tg(() => ENDLESS2_TRADE_LEVELS, 3) || 3;
+  function tradeStage() {
+    const sc = document.getElementById('trade-screen');
+    if (!sc || !shown(sc)) return null;
+    const list = document.getElementById('trade-team-list'), ch = document.getElementById('trade-choices');
+    if (ch && ch.style.display !== 'none' && ch.children.length) return { stage: 'offers', el: ch };
+    if (list && list.style.display !== 'none' && list.children.length) return { stage: 'pick', el: list };
+    return null;
+  }
+  function poolIds(s, R) { return (withSeed(() => tg(() => R.pool(s.currentMap || 0), [])) || []).filter(id => dex(id)); }
+  const sampleN = (a, n) => { const c = a.slice(), o = []; while (c.length && o.length < n) o.push(c.splice(Math.floor(Math.random() * c.length), 1)[0]); return o; };
+  // Paso 1: a quién mandar. Valor esperado de cambiarlo por lo que suele salir en este mapa (su nivel + 3).
+  function tradePickData(s, R, team, bosses) {
+    return pmemo('tradepick', s, () => {
+      if (!canSim(s, team, bosses)) return null;
+      const base = baseOutlook(s, team, bosses), ids = poolIds(s, R), tier = tierForMap(s.currentMap || 0);
+      if (!ids.length) return null;
+      const rows = team.map((p, i) => {
+        const lv = Math.min(100, p.level + TRADE_PLUS());
+        let ok = ids.filter(id => tg(() => minLevelForSpecies(id), 1) <= lv); if (!ok.length) ok = ids;
+        const g = sampleN(ok, 4).map(id => { const m = mkFoe(id, lv, tier); return m ? Math.round(gainOf(teamOutlook(s, team.map((q, j) => j === i ? m : q), bosses, 30), base)) : null; }).filter(x => x != null).sort((a, b) => b - a);
+        const exp = g.length ? Math.round((g[0] + (g[1] ?? g[0])) / 2) : 0;
+        return { p, i, exp, lv };
+      }).sort((a, b) => b.exp - a.exp);
+      return { rows, best: rows[0] };
+    });
+  }
+  // Paso 2: qué oferta coger, sabiendo solo su tipo y nivel.
+  function tradeOfferData(s, R, team, bosses) {
+    return pmemo('tradeoffers', s, () => {
+      const st = s.savedTrade;
+      if (!st || !Array.isArray(st.offers) || !team[st.idx] || !canSim(s, team, bosses)) return null;
+      const base = baseOutlook(s, team, bosses), ids = poolIds(s, R), tier = tierForMap(s.currentMap || 0), out = team[st.idx];
+      const rows = st.offers.map((o, k) => {
+        const T = o._revealType || (o.types || ['Normal'])[0], lv = o.level;
+        const ev = [...new Set(ids.filter(id => tg(() => minLevelForSpecies(id), 1) <= lv).map(id => evoAt(id, lv)))];
+        let c = ev.filter(id => (dex(id).types || []).includes(T));
+        if (!c.length) c = ids.filter(id => (dex(id).types || []).includes(T));
+        const g = sampleN(c, 5).map(id => { const m = mkMon(id, lv, tier); return m ? Math.round(gainOf(teamOutlook(s, team.map((q, j) => j === st.idx ? m : q), bosses, 30), base)) : null; }).filter(x => x != null);
+        const avg = g.length ? Math.round(sum(g) / g.length) : 0, good = g.length ? Math.round(g.filter(x => x > 0).length / g.length * 100) : 0;
+        return { k, T, lv, avg, good, n: c.length };
+      });
+      const best = rows.slice().sort((a, b) => b.avg - a.avg)[0];
+      return { out, rows, best, take: best && best.avg > 0 };
+    });
+  }
+  function htmlTrade(ts, pick, off) {
+    if (ts.stage === 'pick' && pick) {
+      const b = pick.best;
+      return `<div class="${b.exp > 0 ? 'plc-good' : 'plc-mid'} plc-big">${b.exp > 0 ? 'Manda a ' + esc(nm(b.p)) : 'Intercambiar no compensa ahora'}</div>
+        <table>${pick.rows.map(r => `<tr><td><b>${esc(nm(r.p))}</b> <span class="plc-sub">Nv ${r.p.level} · tier ${r.p.moveTier ?? 1}</span><div class="plc-sub">recibirías nv ${r.lv}</div></td><td class="plc-num"><b class="${r.exp > 0 ? 'plc-good' : r.exp < 0 ? 'plc-bad' : ''}">${sgn(r.exp)}</b></td></tr>`).join('')}</table>
+        <div class="plc-sub">Puntos esperados si mandas a ese Pokémon: media de las mejores ofertas que suelen salir en este mapa a su nivel + ${TRADE_PLUS()}. Si todo sale negativo, sáltate el intercambio.</div>`;
+    }
+    if (ts.stage === 'offers' && off) {
+      return `<div class="${off.take ? 'plc-good' : 'plc-mid'} plc-big">${off.take ? 'Coge la oferta ' + (off.best.k + 1) + ' (' + esc(off.best.T) + ')' : 'Ninguna oferta compensa: pulsa saltar y te quedas a ' + esc(nm(off.out))}</div>
+        <table>${off.rows.map(r => `<tr><td><b>Oferta ${r.k + 1}</b> ${chip(r.T)} <span class="plc-sub">Nv ${r.lv}</span><div class="plc-sub">mejora tu equipo en el ${r.good}% de los casos (${r.n} especies posibles)</div></td><td class="plc-num"><b class="${r.avg > 0 ? 'plc-good' : r.avg < 0 ? 'plc-bad' : ''}">${sgn(r.avg)}</b></td></tr>`).join('')}</table>
+        <div class="plc-sub">El juego oculta qué Pokémon es: la nota es la media de las especies del mapa con ese tipo, en lugar de ${esc(nm(off.out))}.</div>`;
+    }
+    return '<div class="plc-sub">Calculando el intercambio…</div>';
+  }
+
   function choiceData(s, team, bosses, vc) {
     return memo('choice', () => {
       const tier = tierForMap(s.currentMap || 0), avg = team.length ? sum(team.map(p => p.level)) / team.length : 5;
@@ -974,7 +1184,7 @@
       const base = tg(() => simChoice(s, team, bosses, cands), null);
       if (base && cands.every(x => x.sim)) {
         cands.sort((a, b) => b.gain - a.gain || b.sc.total - a.sc.total);
-        const best = cands[0], verdict = !team.length || (!full && best.gain >= -2) ? 'take' : full && best.gain >= 4 ? 'swap' : 'skip';
+        const best = cands[0], verdict = !team.length || !full ? 'take' : best.gain >= 4 ? 'swap' : 'skip';
         return { cands, mine, full, best, worst: best.out ? { p: best.out, sc: (mine.find(x => x.p === best.out) || {}).sc || { total: 0 } } : mine[0], verdict, base, sim: true };
       }
       const best = cands[0], worst = mine[0];
@@ -991,10 +1201,10 @@
           : `<div class="plc-mid plc-big">Ninguno mejora tu equipo</div>`;
       h += `<div class="plc-sub">Sin capturar: próximo boss ${bs.next}%${bs.fut != null ? ' · jefes siguientes ' + bs.fut + '%' : ''} (a nivel de llegada)</div>`;
       h += `<table>${cd.cands.map((x, i) => `<tr><td>${monImg(x.m)}</td><td><b>${esc(x.m.name)}</b> <span class="plc-sub">Nv ${x.m.level}</span> ${chips(x.m.types)}
-        <div>Boss: <b class="${simCls(x.sim.next)}">${x.sim.next}%</b>${x.sim.fut != null ? ` · siguientes: <b class="${simCls(x.sim.fut)}">${x.sim.fut}%</b>` : ''}${x.out ? ` <span class="plc-sub">(en lugar de ${esc(nm(x.out))})</span>` : ''}</div>
+        <div>Boss: <b class="${simCls(x.sim.next)}">${x.sim.next}%</b>${x.sim.fut != null ? ` · siguientes: <b class="${simCls(x.sim.fut)}">${x.sim.fut}%</b>` : ''}${x.sim.lowName && x.sim.lowName !== (bosses[0] || {}).name ? ` · ${esc(x.sim.lowName)}: <b class="${simCls(x.sim.low)}">${x.sim.low}%</b>` : ''}${x.out ? ` <span class="plc-sub">(en lugar de ${esc(nm(x.out))})</span>` : ''}</div>
         <div class="plc-sub">${esc(x.sc.why.slice(0, 2).join(' · '))}</div></td>
         <td class="plc-num"><b class="${x.gain >= 4 ? 'plc-good' : x.gain <= -4 ? 'plc-bad' : ''}">${sg(x.gain)}</b></td></tr>`).join('')}</table>`;
-      h += '<div class="plc-sub">+N: puntos de % de victoria que ganas: 60% próximo boss, 40% los dos siguientes. Todo a nivel de llegada y con evoluciones, simulado con el motor del juego.</div>';
+      h += '<div class="plc-sub">+N: puntos de % de victoria que ganas: 45% próximo boss, 30% los dos siguientes, 25% el más difícil de los tres. Todo a nivel de llegada y con evoluciones, simulado con el motor del juego.</div>';
     } else if (cd && cd.best) {
       const b = cd.best, w = cd.worst;
       h += cd.verdict === 'take' ? `<div class="plc-good plc-big">Coge a ${esc(b.m.name)} (${b.sc.total})</div>`
@@ -1004,7 +1214,7 @@
       if (cd.mine.length) h += det('mine', 'Puntos de tu equipo', `<div class="plc-sub">${cd.mine.map(x => `${esc(nm(x.p))} ${x.sc.total}`).join(' · ')}<br>0–100, orientativo: 40% jefes que quedan, 25% stats y potencia, 20% cobertura, 15% nivel.</div>`);
     }
     (viAdv || []).forEach(({ it, b }) => {
-      if (b && b.sim) { h += `<div class="plc-enemy"><b>${esc(it.name)}</b> → ${b.g >= 2 ? `<b class="plc-good">${esc(nm(b.p))}</b> <span class="plc-sub">${sgn(b.g)} pts${b.lose ? ', deja ' + esc(itemName(b.lose)) : ''}</span>` : '<span class="plc-sub">no cambia tus combates de forma medible</span>'}<div class="plc-sub">${esc(it.desc || '')}</div></div>`; return; }
+      if (b && b.sim) { h += `<div class="plc-enemy"><b>${esc(it.name)}</b> → ${b.p && b.g >= 3 ? `<b class="plc-good">${esc(nm(b.p))}</b> <span class="plc-sub">${sgn(b.g)} pts${b.lose ? ', deja ' + esc(itemName(b.lose)) : ''}</span>` : b.p ? `<b>${esc(nm(b.p))}</b> <span class="plc-sub">si lo coges (apenas cambia tus combates)</span>` : `<span class="plc-sub">${esc(b.note || 'no cambia tus combates de forma medible')}</span>`}<div class="plc-sub">${esc(it.desc || '')}</div></div>`; return; }
       h += `<div class="plc-enemy"><b>${esc(it.name)}</b> → ${b && b.p ? `<b class="plc-good">${esc(nm(b.p))}</b>` : '<span class="plc-sub">sin portador claro</span>'} <span class="plc-sub">${b && b.g >= 1.5 ? '+' + b.g.toFixed(0) + ' pts vs ' + esc(bosses[0] ? bosses[0].name : 'boss') : esc((b && b.note) || '')}</span></div>`;
     });
     return h;
@@ -1035,15 +1245,17 @@
     return JSON.stringify([s.runSeed, s.currentMap, s.eliteIndex, (s.items || []).map(i => i && (i.id || i)),
       (s.team || []).map(p => [p._uid, p.level, p.currentHp, p.maxHp, p.moveTier, p.heldItem && (p.heldItem.id || p.heldItem), p.speciesId]),
       Object.values((s.map && s.map.nodes) || {}).filter(n => n.visited || n.accessible).map(n => n.id + (n.visited ? 'v' : 'a')).join(),
-      vc && vc.cards.map(c => [c.id, c.level]), vi && vi.map(x => x.it.id), !!tg(visibleTutor, null), (tg(visiblePassives, null) || []).map(x => x.it.id), (s.passives || []).map(x => x && x.id)]);
+      vc && vc.cards.map(c => [c.id, c.level]), vi && vi.map(x => x.it.id), !!tg(visibleTutor, null), (tg(tradeStage, null) || {}).stage, s.savedTrade && s.savedTrade.idx, (tg(visiblePassives, null) || []).map(x => x.it.id), (s.passives || []).map(x => x && x.id)]);
   }
 
   /* ---------- alertas, checklist y marcas sobre el juego ---------- */
-  function buildChecks(s, team, bosses, adv, issues, fights, nw) {
+  function buildChecks(s, team, bosses, adv, issues, fights, nw, nl) {
     const mapTier = tierForMap(s.currentMap || 0), lag = team.filter(p => mapTier != null && p.moveTier != null && p.moveTier < mapTier).map(nm);
     const c = [];
     if (adv) c.push(adv.bad ? { lv: 'bad', msg: `Orden: lidera ${nm(adv.cur.p)} (${adv.cur.pct}%). Pon primero a ${nm(adv.best.p)} (${adv.best.pct}%)` } : { lv: 'ok', msg: `Orden: ${nm(adv.cur.p)} es buen líder (${adv.cur.pct}%)` });
-    issues.forEach(x => c.push({ lv: 'warn', msg: x.kind === 'swap' ? `${itemName(x.item)}: pásalo de ${nm(x.p)} a ${nm(x.o)}` : `${itemName(x.item)} sin equipar: dáselo a ${nm(x.o)}` }));
+    issues.forEach(x => c.push({ lv: 'warn', msg: x.kind === 'useless' ? `${itemName(x.item)} en ${nm(x.p)} no sirve (nadie ataca con tipo ${itemType(x.item)})` : x.kind === 'swap' ? `${itemName(x.item)}: pásalo de ${nm(x.p)} a ${nm(x.o)}` : `${itemName(x.item)} sin equipar: dáselo a ${nm(x.o)}` }));
+    tg(() => megaData(s, team, bosses), []).forEach(m => { if (m.ready && !m.held) c.push({ lv: 'warn', msg: `Megapiedra sin equipar: ${m.st.name} para ${nm(m.p)}${m.gain != null ? ' (' + sgn(m.gain) + ' pts)' : ''}` }); else if (m.wrongHolder) c.push({ lv: 'warn', msg: `${m.st.name} la lleva quien no puede usarla: dásela a ${nm(m.p)}` }); });
+    (s.items || []).filter(i => i && i.isMegaStone).forEach(i => c.push({ lv: 'warn', msg: `Tienes ${i.name} en la bolsa sin equipar` }));
     if (!issues.length && (team.some(p => p.heldItem) || (s.items || []).length)) c.push({ lv: 'ok', msg: 'Objetos bien repartidos' });
     if (bosses[0]) {
       const diff = Math.round(sum(team.map(p => p.level)) / team.length - Math.max(...bosses[0].mons.map(m => m.level)));
@@ -1052,8 +1264,13 @@
     c.push(lag.length ? { lv: 'warn', msg: 'Tier de ataque atrasado: ' + lag.join(', ') } : { lv: 'ok', msg: 'Tier de ataques al día' });
     if (adv && adv.boss && bosses[0]) { const sf = tg(() => simFight(s, team, bosses[0]), null); if (sf) c.unshift({ lv: sf.base.pct >= 80 ? 'ok' : sf.base.pct >= 50 ? 'warn' : 'bad', msg: `${bosses[0].name}: ganas el ${sf.base.pct}% de las simulaciones` }); }
     if (nw) Object.values((s.map && s.map.nodes) || {}).filter(n => n.accessible && !n.visited && n.type !== 'boss' && nw.has(n.id) && nw.get(n.id) < 70).forEach(n => {
-      const pct = nw.get(n.id), side = nodeSide(n, s.map.nodes), safe = n.type === 'sycamore';
+      const pct = nw.get(n.id), side = nodeSide(n, s.map.nodes), safe = false;
       c.push({ lv: pct < 50 && !safe ? 'bad' : 'warn', msg: `${pct < 50 && !safe ? 'No entres en' : 'Cuidado con'} ${nodeName(n)}${side ? ' (' + side + ')' : ''}: ganas el ${pct}%${safe ? ' (sin muerte permanente)' : ''}` });
+    });
+    if (nl) nl.forEach((x, id) => {
+      const n = s.map.nodes[id]; if (!n) return;
+      const side = nodeSide(n, s.map.nodes);
+      if (x.best.p !== x.cur.p && x.best.pct - x.cur.pct >= 15) c.push({ lv: x.cur.pct < 50 ? 'bad' : 'warn', msg: `Si vas a ${nodeName(n)}${side ? ' (' + side + ')' : ''}: lidera con ${nm(x.best.p)} (${x.best.pct}% frente a ${x.cur.pct}% con ${nm(x.cur.p)})` });
     });
     if (adv && adv.boss && bosses[0]) { const a = tg(() => auraAdvice(s, team, bosses[0]), null); if (a && a.best && a.base < 85 && a.best.pct - a.base >= 15) c.push({ lv: 'warn', msg: `Tienes ${AURA[a.best.k][1]}: ${a.best.how} y pasas de ${a.base}% a ${a.best.pct}%` }); }
     const alive = team.filter(p => p.currentHp > 0);
@@ -1081,14 +1298,19 @@
   }
   function drawNodeLabels() {
     const s = getState(), ms = document.getElementById('map-screen');
-    if (!last || !last.nodeWin || !s || !s.map || !ms || ms.offsetParent === null) { nodeBox.innerHTML = ''; return; }
+    const over = [...document.querySelectorAll('#item-equip-modal,.item-equip-overlay')].some(e => !e.closest('.plc-p') && shown(e) && e.getBoundingClientRect().width > 200);
+    if (over || !last || !last.nodeWin || !s || !s.map || !ms || !shown(ms)) { nodeBox.innerHTML = ''; return; }
     let h = '';
-    last.nodeWin.forEach((pct, id) => {
+    last.nodeWin.forEach((pct0, id) => {
+      let pct = pct0;
       const n = s.map.nodes[id], el = document.querySelector('[data-node-id="' + id + '"]');
       if (!n || n.visited || !el) return;
       const r = el.getBoundingClientRect();
       if (!r.width || r.bottom < 0 || r.top > innerHeight) return;
-      h += `<span class="plc-nl ${pct >= 80 ? 'plc-nl-g' : pct >= 50 ? 'plc-nl-m' : 'plc-nl-b'}${n.accessible ? ' plc-nl-acc' : ''}" style="left:${Math.round(r.left + r.width / 2)}px;top:${Math.round(r.bottom - 6)}px">${pct}%</span>`;
+      const ld = last.nodeLead && last.nodeLead.get ? last.nodeLead.get(id) : null;
+      const lead = ld && n.accessible ? `<br><span class="plc-nl-lead">${ld.best.p === ld.cur.p ? '✓ ' : '1º '}${esc(nm(ld.best.p))}</span>` : '';
+      if (ld && n.accessible) pct = ld.best.pct; // con el líder recomendado
+      h += `<span class="plc-nl ${pct >= 80 ? 'plc-nl-g' : pct >= 50 ? 'plc-nl-m' : 'plc-nl-b'}${n.accessible ? ' plc-nl-acc' : ''}" style="left:${Math.round(r.left + r.width / 2)}px;top:${Math.round(r.bottom - 6)}px">${pct}%${lead}</span>`;
     });
     nodeBox.innerHTML = h;
   }
@@ -1112,7 +1334,8 @@
       const cd = last.cd, adv = last.adv;
       if (cd && cd.verdict === 'swap') mark(slot(cd.worst.p), 'bad', 'quitar · ' + cd.worst.sc.total);
       if (adv && adv.bad) { mark(slot(adv.cur.p), 'bad', 'líder · ' + adv.cur.pct + '%'); mark(slot(adv.best.p), 'good', 'ponlo 1º · ' + adv.best.pct + '%'); }
-      (last.issues || []).forEach(x => { if (x.kind === 'swap') mark(slot(x.p), 'warn', 'objeto → ' + nm(x.o)); else mark(slot(x.o), 'warn', 'dale ' + itemName(x.item)); });
+      (last.issues || []).forEach(x => { if (x.kind === 'swap') mark(slot(x.p), 'warn', 'objeto → ' + nm(x.o)); else if (x.kind === 'useless') mark(slot(x.p), 'warn', 'objeto inútil'); else mark(slot(x.o), 'warn', 'dale ' + itemName(x.item)); });
+      (last.megas || []).forEach(m => { if (m.ready && !m.held) mark(slot(m.p), 'warn', 'equipa ' + m.st.name); });
     });
     if (last.cd) {
       const vc = tg(visibleCards, null);
@@ -1128,13 +1351,18 @@
       const vt = tg(visibleTutor, null), rows = vt ? [...vt.querySelectorAll('.equip-pokemon-row')] : [];
       if (rows.length === last.tdat.rows.length) last.tdat.rows.forEach((r, i) => { if (!r.maxed) mark(rows[i], r === last.tdat.best ? 'good' : 'info', (r === last.tdat.best ? 'enseñar · ' : '') + sgn(r.gain) + ' pts'); });
     }
+    if (last.ts) {
+      const ts = tg(tradeStage, null);
+      if (ts && ts.stage === 'pick' && last.tpick) { const kids = [...ts.el.children]; last.tpick.rows.forEach(r => { const el = kids[r.i]; if (el) mark(el, r === last.tpick.best && r.exp > 0 ? 'good' : r.exp < 0 ? 'bad' : 'info', (r === last.tpick.best && r.exp > 0 ? 'mandar · ' : '') + sgn(r.exp) + ' pts'); }); }
+      if (ts && ts.stage === 'offers' && last.toff) { const kids = [...ts.el.children]; last.toff.rows.forEach(r => { const el = kids[r.k]; if (el) mark(el, r === last.toff.best && last.toff.take ? 'good' : 'info', (r === last.toff.best && last.toff.take ? 'coger · ' : '') + sgn(r.avg) + ' pts'); }); }
+    }
     if (last.pdat) {
       const vp = tg(visiblePassives, null);
       if (vp) vp.forEach(v => { const r = last.pdat.rows.find(k => k.it === v.it); if (r) mark(v.el, r === last.pdat.best && r.gain >= 2 ? 'good' : 'info', sgn(r.gain) + ' pts'); });
     }
     if (last.viAdv) {
       const vi = tg(visibleItems, null);
-      if (vi) vi.forEach(v => { const a = last.viAdv.find(k => k.it === v.it); if (a && a.b && a.b.p) mark(v.el, a.b.g >= 2 ? 'good' : 'info', a.b.sim ? (a.b.g >= 2 ? '→ ' + nm(a.b.p) + ' ' + sgn(a.b.g) : '±0') : '→ ' + nm(a.b.p) + (a.b.g >= 1.5 ? ' +' + a.b.g.toFixed(0) : '')); });
+      if (vi) vi.forEach(v => { const a = last.viAdv.find(k => k.it === v.it); if (!a || !a.b) return; if (!a.b.p) { mark(v.el, 'info', 'nadie lo usa'); return; } mark(v.el, a.b.g >= 3 ? 'good' : 'info', a.b.sim ? (a.b.g >= 3 ? '→ ' + nm(a.b.p) + ' ' + sgn(a.b.g) : '→ ' + nm(a.b.p) + ' ±0') : '→ ' + nm(a.b.p) + (a.b.g >= 1.5 ? ' +' + a.b.g.toFixed(0) : '')); });
     }
   }
 
@@ -1162,7 +1390,7 @@
     if (sig === lastSig) return;
     lastSig = sig;
     if (sig !== memoSig) { memoSig = sig; memoMap.clear(); }
-    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.10.0${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
+    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.12.0${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
     if (missing.length) hl += `<div class="plc-warn">Compatibilidad parcial con esta versión. Falta: ${esc(missing.join(', '))}</div>`;
     if (!seedOK()) hl += '<div class="plc-warn">Cálculo de daño desactivado: no puedo proteger la semilla del juego en esta versión.</div>';
     hl += reminders.map(r => `<div class="plc-rem">${esc(r.msg)}<button data-plc-rem="${r.id}" title="Descartar">×</button></div>`).join('');
@@ -1172,11 +1400,15 @@
     const viAdv = vi ? (viSim || vi.map(x => ({ it: x.it, b: tg(() => bestHolder(x.it, team, bosses[0], s.items || []), null) }))) : null;
     const vt = tg(visibleTutor, null), tdat = vt ? tg(() => tutorData(s, team, bosses), null) : null;
     const vp = tg(visiblePassives, null), pdat = vp ? tg(() => passiveData(s, team, bosses, vp), null) : null;
+    const ts = tg(tradeStage, null);
+    const tpick = ts && ts.stage === 'pick' ? tg(() => tradePickData(s, R, team, bosses), null) : null;
+    const toff = ts && ts.stage === 'offers' ? tg(() => tradeOfferData(s, R, team, bosses), null) : null;
     let hr = '<h2>Lo que viene</h2>';
-    const choosing = !!(cd || viAdv || tdat || pdat);
+    const choosing = !!(cd || viAdv || tdat || pdat || ts);
     if (cd || viAdv) hr += '<h3>Elección en pantalla</h3>' + tg(() => htmlChoice(cd, viAdv, bosses), '');
     if (tdat) hr += '<h3>Tutor de ataques</h3>' + tg(() => htmlTutor(tdat), '');
     if (pdat) hr += '<h3>Pasiva en pantalla</h3>' + tg(() => htmlPassives(pdat), '');
+    if (ts) hr += '<h3>Intercambio</h3>' + tg(() => htmlTrade(ts, tpick, toff), '');
     if (!team.length) {
       last = { cd, viAdv, issues: [], adv: null }; setAlert([]); nodeBox.innerHTML = '';
       put(L, hl + '<div class="plc-sub">Empieza o reanuda un run de Story. Battle Tower llegará en una fase posterior.</div>'); put(Rp, hr, true); return;
@@ -1185,8 +1417,12 @@
     const issues = tg(() => itemIssues(s, team, bosses[0]), []) || [];
     const sp = tg(() => specialFights(s), null);
     const nw = tg(() => nodeWins(s, R, team, bosses), null);
-    const checks = tg(() => buildChecks(s, team, bosses, adv, issues, sp && sp.fights, nw), []) || [];
-    last = { cd, viAdv, tdat, pdat, vp, issues, adv, sfBoss: bosses[0] ? tg(() => simFight(s, team, bosses[0]), null) : null, bossName: bosses[0] ? bosses[0].name : null };
+    const nl = choosing ? null : tg(() => nodeLeads(s, R, team, bosses), null);
+    const checks = tg(() => buildChecks(s, team, bosses, adv, issues, sp && sp.fights, nw, nl), []) || [];
+    const wp = choosing ? null : tg(() => wallPlan(s, R, team, bosses), null);
+    if (wp) checks.unshift(wp.reset ? { lv: 'bad', msg: `Resetea: llegas a ${wp.wall.name} con un ${wp.pctNow}% y no quedan capturas en este mapa` } : { lv: wp.pctNow < 20 ? 'bad' : 'warn', msg: `${wp.wall.name}: ${wp.pctNow}% con tu equipo. ${wp.good.length ? 'Busca ' + wp.good.slice(0, 3).map(r => r.name).join(', ') : 'Sube nivel y tier'}` });
+    const prevRoute = last && last.route;
+    last = { cd, viAdv, tdat, pdat, vp, ts, tpick, toff, issues, adv, sfBoss: bosses[0] ? tg(() => simFight(s, team, bosses[0]), null) : null, bossName: bosses[0] ? bosses[0].name : null };
     setAlert(choosing ? [] : checks);
     const fresh = Object.values((s.map && s.map.nodes) || {}).filter(n => n.visited).length <= 1;
     hl += `<div class="plc-sub">${esc(R.name)}${s.nuzlockeMode ? ' · Nuzlocke' : ' · Classic'} · Mapa ${cur + 1}/${R.leaders.length + 1}${R.maps[cur] ? ' · ' + esc(R.maps[cur]) : ''}</div>`;
@@ -1198,8 +1434,9 @@
     if (mdat && mdat.length) hl += '<h3>Megas</h3>' + tg(() => htmlMegas(mdat), '');
     hl += det('cov', 'Cobertura de tipos y tier', htmlCoverage(team) + htmlTiers(R, s));
     hl += det('log', `Registro de aciertos (${readLog().length} combates)`, tg(htmlLog, ''));
-    const rp = tg(() => routePlan(s, R, team, bosses), null);
-    last.route = rp; last.nodeWin = nw;
+    const rp = choosing ? prevRoute || null : tg(() => routePlan(s, R, team, bosses), null);
+    last.route = rp; last.wall = wp; last.nodeWin = nw; last.nodeLead = nl; last.megas = tg(() => megaData(s, team, bosses), []);
+    if (wp) hr += `<h3>Plan contra ${esc(wp.wall.name)}</h3>` + tg(() => htmlWall(wp), '');
     if (rp && !choosing) hr += '<h3>Ruta recomendada</h3>' + tg(() => htmlRoute(rp), '');
     const aura = bosses[0] ? tg(() => auraAdvice(s, team, bosses[0]), null) : null;
     hr += '<h3>Próximo boss</h3>' + (last.sfBoss ? simLine(last.sfBoss, bosses[0].name) : '') + (aura ? tg(() => htmlAura(aura, bosses[0].name), '') : '') + (bosses.length ? tg(() => htmlBoss(team, bosses[0], s.items || []), '') : '<div class="plc-sub">No quedan jefes.</div>');
@@ -1275,8 +1512,8 @@
     tip.style.top = Math.min(ev.clientY + 14, innerHeight - tip.offsetHeight - 6) + 'px';
   }, true);
 
-  window.__PLC = { render: () => { lastSig = ''; render(); } };
+  window.__PLC = { render: () => { lastSig = ''; render(); }, last: () => last };
   tg(hookBattle);
-  setInterval(() => { tg(hookBattle); tg(watch); tg(render); tg(applyMarks); tg(drawNodeLabels); }, 1000);
+  setInterval(() => { tg(hookBattle); tg(watch); tg(render); tg(applyMarks); tg(drawNodeLabels); tg(() => { sampleTrainers(); }); }, 1000);
   tg(render);
 })();

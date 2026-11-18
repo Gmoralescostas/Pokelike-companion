@@ -716,6 +716,9 @@
       const top3 = (() => { const t = team.map(p => p.level).sort((a, b) => b - a).slice(0, 3); return sum(t) / Math.max(1, t.length); })();
       // Cuánto te faltará para el boss siguiente: los niveles de este mapa también cuentan para él.
       const need2 = bosses[1] ? clamp((Math.max(...bosses[1].mons.map(m => m.level)) - 3 - top3) / 12) : 0;
+      // Si llegas sin respuesta a un muro (p. ej. Grant), las capturas valen más según lo probable que sea que salga un counter.
+      const wp = tg(() => wallPlan(s, R, team, bosses), null), poolN = Math.max(1, (tg(() => poolIds(s, R), []) || []).length);
+      const ctr = wp && wp.good.length ? (1 - Math.pow(1 - wp.good.length / poolN, 3)) * (1 - wp.pctNow / 100) : 0;
       const cache = new Map();
       const info = n => {
         if (cache.has(n.id)) return cache.get(n.id);
@@ -723,7 +726,7 @@
         switch (n.type) {
           case 'battle': v = (4 + 8 * need) * xp * (tg(() => kalosIsHorde(n), false) ? 1.5 : 1); p = wildWin; fight = true; break;
           case 'trainer': { const g = td && td.list.find(x => x.ns.includes(n)); v = (6 + 10 * need) * xp; p = g && g.win != null ? g.win / 100 : 0.9; fight = true; break; }
-          case 'catch': v = free > 0 ? 12 + 4 * Math.min(3, free) : 4; break;
+          case 'catch': v = (free > 0 ? 12 + 4 * Math.min(3, free) : 4) + 70 * ctr; break;
           case 'item': v = 8; break;
           case 'pokecenter': v = 2 + 14 * hurt; break;
           case 'move_tutor': v = team.some(p => (p.moveTier ?? 1) < MAX_TIER) ? (lag ? 12 : 9) : 1; break;
@@ -731,7 +734,7 @@
           case 'korrina': case 'lysandre': { const f = sp && sp.fights.find(x => x.node === n), sf = f ? tg(() => simFight(s, team, f), null) : null; v = 10; p = sf ? sf.base.pct / 100 : 0.7; fight = true; break; }
           case 'legendary': case 'masterball': v = 10; p = 0.8; fight = true; break;
           case 'question': v = 5; break;
-          case 'trade': v = 3; break;
+          case 'trade': v = 3 + 25 * ctr; break;
           case 'boss': v = 0; break;
         }
         const r = { v, p, fight }; cache.set(n.id, r); return r;
@@ -770,7 +773,7 @@
       }
       const nwm = tg(() => nodeWins(s, R, team, bosses), null);
       const options = starts.map(n => { const b = ranked.find(x => x.path[0] === n); return b ? { node: n, score: b.score, surv: b.surv, bossWin: b.chain ? b.chain.win : null, win: nwm && nwm.has(n.id) ? nwm.get(n.id) / 100 : info(n).p, fight: info(n).fight } : null; }).filter(Boolean).sort((a, b) => b.score - a.score);
-      return { best: ranked[0], options, nodes, need, need2, hurt, free, count: paths.length };
+      return { best: ranked[0], options, nodes, need, need2, hurt, free, ctr, wall: wp, count: paths.length };
     });
   }
   function htmlRoute(rp) {
@@ -778,7 +781,8 @@
     const why = [];
     if (rp.need > 0.3) why.push('vas bajo de nivel: prioriza combates');
     else if (rp.need2 > 0.3) why.push('el boss siguiente te sacará nivel: aprovecha los combates de este mapa');
-    if (rp.free > 0) why.push('tienes huecos: prioriza capturas');
+    if (rp.ctr > 0.15 && rp.wall) why.push('busca un counter para ' + rp.wall.wall.name + ': las capturas valen más');
+    else if (rp.free > 0) why.push('tienes huecos: prioriza capturas');
     if (rp.hurt > 0.3) why.push('equipo tocado: valora el Centro Pokémon');
     let h = `<div class="plc-good plc-big">Ve a: ${esc(nodeName(first))}${side ? ' (' + side + ')' : ''}</div>
       <div class="plc-sub">Después: ${b.path.slice(1).map(n => esc(nodeName(n))).join(' → ') || '—'}</div>
@@ -935,19 +939,23 @@
   // % de victoria del equipo contra el próximo boss (tal como estás) y contra los dos siguientes (a su nivel, con evoluciones).
   function teamOutlook(s, team, bosses, n, extra) {
     extra = Object.assign({ seed: PAIR }, extra || {});
+    if (!team.length) return { next: 0, fut: bosses.length > 1 ? 0 : null, low: 0, lowName: null };
     // Próximo boss: al nivel con el que sueles llegar (3 por debajo de su máximo, o el tuyo si ya vas por encima).
     const b0 = bosses[0], lv0 = b0 ? Math.max(...b0.mons.map(m => m.level)) - 3 : 0;
     const r0 = b0 ? simRun(s, team.map(p => p.level >= lv0 ? p : grownTo(p, lv0, 0)), b0.mons, n, false, extra) : null;
     const fut = bosses.slice(1, 3).map(b => {
       const lv = Math.max(...b.mons.map(m => m.level)) - 2;
       const r = simRun(s, team.map(p => grownTo(p, lv, b.tier)), b.mons, Math.ceil(n / 2), false, extra);
-      return r ? r.pct : null;
-    }).filter(x => x != null);
-    return { next: r0 ? r0.pct : null, fut: fut.length ? Math.round(sum(fut) / fut.length) : null };
+      return r ? { b, pct: r.pct } : null;
+    }).filter(Boolean);
+    // El "muro": el jefe más difícil de los tres próximos.
+    const all = (r0 ? [{ b: b0, pct: r0.pct }] : []).concat(fut), lo = all.length ? all.reduce((a, x) => x.pct < a.pct ? x : a) : null;
+    return { next: r0 ? r0.pct : null, fut: fut.length ? Math.round(sum(fut.map(x => x.pct)) / fut.length) : null, low: lo ? lo.pct : null, lowName: lo ? lo.b.name : null };
   }
-  const gainOf = (o, b) => 0.6 * ((o.next ?? 0) - (b.next ?? 0)) + 0.4 * ((o.fut ?? 0) - (b.fut ?? 0));
+  // 45% próximo boss, 30% media de los dos siguientes, 25% el más difícil de los tres (para no llegar sin respuesta a un muro como Grant).
+  const gainOf = (o, b) => 0.45 * ((o.next ?? 0) - (b.next ?? 0)) + 0.3 * ((o.fut ?? 0) - (b.fut ?? 0)) + 0.25 * ((o.low ?? 0) - (b.low ?? 0));
   function simChoice(s, team, bosses, cands) {
-    if (!seedOK() || !bosses.length || !team.length || typeof origRB() !== 'function') return null;
+    if (!seedOK() || !bosses.length || typeof origRB() !== 'function') return null;
     const base = teamOutlook(s, team, bosses, 80);
     if (base.next == null) return null;
     const full = team.length >= TEAM_CAP;
@@ -963,6 +971,47 @@
     return base;
   }
 
+
+  /* ---------- plan contra el muro (p. ej. Grant en Kalos) ---------- */
+  // Busca el jefe más difícil de los tres próximos y qué especies del mapa actual le dan respuesta.
+  function wallPlan(s, R, team, bosses) {
+    return pmemo('wall', s, () => {
+      if (!canSim(s, team, bosses) || bosses.length < 2) return null;
+      const base = baseOutlook(s, team, bosses);
+      if (base.low == null || base.low >= 50) return null;
+      const wi = bosses.slice(0, 3).findIndex(b => b.name === base.lowName), wall = bosses[wi];
+      if (!wall || wi === 0) return null; // si el muro es el próximo boss ya lo cubre el resto del panel
+      const lv = Math.max(...wall.mons.map(m => m.level)) - 2, tier = tierForMap(s.currentMap || 0);
+      const grown = team.map(p => grownTo(p, lv, wall.tier));
+      const now = simRun(s, grown, wall.mons, 24, false, { seed: PAIR });
+      const full = team.length >= TEAM_CAP;
+      const ids = [...new Set(poolIds(s, R))];
+      const rows = ids.map(id => {
+        const m = mkMon(id, 5, tier); if (!m) return null;
+        const g = grownTo(m, lv, wall.tier);
+        let best = null;
+        const tries = full ? team.map((q, j) => grown.map((x, k) => k === j ? g : x)) : [grown.concat(g)];
+        tries.forEach(t => { const r = simRun(s, t, wall.mons, 16, false, { seed: PAIR }); if (r && (!best || r.pct > best)) best = r.pct; });
+        return best == null ? null : { id, name: m.name, types: m.types, pct: best };
+      }).filter(Boolean).sort((a, b) => b.pct - a.pct);
+      const nodes = Object.values((s.map && s.map.nodes) || {});
+      const catchesLeft = nodes.filter(n => !n.visited && (n.type === 'catch' || n.type === 'trade')).length;
+      const pctNow = now ? now.pct : base.low;
+      const good = rows.filter(r => r.pct >= Math.max(40, pctNow + 25));
+      const reset = (s.currentMap || 0) === 0 && wi === 1 && pctNow < 20 && catchesLeft === 0 && good.length > 0;
+      return { wall, lv, pctNow, rows, good, catchesLeft, reset, wi };
+    });
+  }
+  function htmlWall(wp) {
+    if (!wp) return '';
+    let h = `<div class="${wp.pctNow < 20 ? 'plc-bad' : 'plc-mid'} plc-big">${esc(wp.wall.name)}: le ganas el ${wp.pctNow}% con tu equipo actual</div>`;
+    h += `<div class="plc-sub">Simulado a nv ~${wp.lv}, con evoluciones. ${wp.wall.mons.map(m => esc(m.name)).join(', ')}</div>`;
+    if (wp.reset) h += `<div class="plc-bad plc-big">Te conviene resetear el run ahora: ya no quedan capturas en este mapa y llegas a ${esc(wp.wall.name)} sin respuesta. Reiniciar ahora cuesta poco.</div>`;
+    if (wp.good.length) h += `<div>Lo que le da respuesta y puede salir en este mapa (${wp.catchesLeft} captura${wp.catchesLeft === 1 ? '' : 's'}/intercambio${wp.catchesLeft === 1 ? '' : 's'} sin hacer):</div>`;
+    else h += '<div class="plc-sub">Ninguna especie de este mapa cambia mucho ese combate: toca subir nivel y tier.</div>';
+    h += `<table>${wp.rows.slice(0, 6).map(r => `<tr><td><b>${esc(r.name)}</b> ${chips(r.types)}</td><td class="plc-num"><b class="${simCls(r.pct)}">${r.pct}%</b></td></tr>`).join('')}</table>`;
+    return h + '<div class="plc-sub">% contra ese jefe si añades la especie a tu equipo (o la cambias por quien menos aporta), simulado con el motor del juego.</div>';
+  }
 
   /* ---------- tutor de ataques, pasivas, objetos y megas (por simulación) ---------- */
   const MAX_TIER = 2;
@@ -993,7 +1042,7 @@
     if (!td) return '';
     let h = td.best ? `<div class="plc-good plc-big">Enséñaselo a ${esc(nm(td.best.p))} (${sgn(td.best.gain)} pts)</div>` : '<div class="plc-sub">Todo tu equipo tiene ya el ataque al máximo.</div>';
     h += `<table>${td.rows.map(r => r.maxed ? `<tr><td>${esc(nm(r.p))}</td><td class="plc-sub">ya al máximo</td><td></td></tr>` : `<tr><td><b>${esc(nm(r.p))}</b></td><td class="plc-sub">${r.from ? esc(r.from.name) + ' ' + r.from.power : ''} → ${r.to ? esc(r.to.name) + ' ' + r.to.power : ''}<br>Boss ${r.o.next ?? '—'}%${r.o.fut != null ? ' · siguientes ' + r.o.fut + '%' : ''}</td><td class="plc-num"><b class="${r.gain >= 4 ? 'plc-good' : ''}">${sgn(r.gain)}</b></td></tr>`).join('')}</table>`;
-    return h + '<div class="plc-sub">Puntos: cuánto sube tu % de victoria (60% próximo boss, 40% los dos siguientes), simulado con el motor del juego.</div>';
+    return h + '<div class="plc-sub">Puntos: cuánto sube tu % de victoria (45% próximo boss, 30% los dos siguientes, 25% el más difícil de los tres), simulado con el motor del juego.</div>';
   }
   // Pasivas ofrecidas en pantalla.
   function visiblePassives() {
@@ -1152,10 +1201,10 @@
           : `<div class="plc-mid plc-big">Ninguno mejora tu equipo</div>`;
       h += `<div class="plc-sub">Sin capturar: próximo boss ${bs.next}%${bs.fut != null ? ' · jefes siguientes ' + bs.fut + '%' : ''} (a nivel de llegada)</div>`;
       h += `<table>${cd.cands.map((x, i) => `<tr><td>${monImg(x.m)}</td><td><b>${esc(x.m.name)}</b> <span class="plc-sub">Nv ${x.m.level}</span> ${chips(x.m.types)}
-        <div>Boss: <b class="${simCls(x.sim.next)}">${x.sim.next}%</b>${x.sim.fut != null ? ` · siguientes: <b class="${simCls(x.sim.fut)}">${x.sim.fut}%</b>` : ''}${x.out ? ` <span class="plc-sub">(en lugar de ${esc(nm(x.out))})</span>` : ''}</div>
+        <div>Boss: <b class="${simCls(x.sim.next)}">${x.sim.next}%</b>${x.sim.fut != null ? ` · siguientes: <b class="${simCls(x.sim.fut)}">${x.sim.fut}%</b>` : ''}${x.sim.lowName && x.sim.lowName !== (bosses[0] || {}).name ? ` · ${esc(x.sim.lowName)}: <b class="${simCls(x.sim.low)}">${x.sim.low}%</b>` : ''}${x.out ? ` <span class="plc-sub">(en lugar de ${esc(nm(x.out))})</span>` : ''}</div>
         <div class="plc-sub">${esc(x.sc.why.slice(0, 2).join(' · '))}</div></td>
         <td class="plc-num"><b class="${x.gain >= 4 ? 'plc-good' : x.gain <= -4 ? 'plc-bad' : ''}">${sg(x.gain)}</b></td></tr>`).join('')}</table>`;
-      h += '<div class="plc-sub">+N: puntos de % de victoria que ganas: 60% próximo boss, 40% los dos siguientes. Todo a nivel de llegada y con evoluciones, simulado con el motor del juego.</div>';
+      h += '<div class="plc-sub">+N: puntos de % de victoria que ganas: 45% próximo boss, 30% los dos siguientes, 25% el más difícil de los tres. Todo a nivel de llegada y con evoluciones, simulado con el motor del juego.</div>';
     } else if (cd && cd.best) {
       const b = cd.best, w = cd.worst;
       h += cd.verdict === 'take' ? `<div class="plc-good plc-big">Coge a ${esc(b.m.name)} (${b.sc.total})</div>`
@@ -1341,7 +1390,7 @@
     if (sig === lastSig) return;
     lastSig = sig;
     if (sig !== memoSig) { memoSig = sig; memoMap.clear(); }
-    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.6${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
+    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.12.0${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
     if (missing.length) hl += `<div class="plc-warn">Compatibilidad parcial con esta versión. Falta: ${esc(missing.join(', '))}</div>`;
     if (!seedOK()) hl += '<div class="plc-warn">Cálculo de daño desactivado: no puedo proteger la semilla del juego en esta versión.</div>';
     hl += reminders.map(r => `<div class="plc-rem">${esc(r.msg)}<button data-plc-rem="${r.id}" title="Descartar">×</button></div>`).join('');
@@ -1370,6 +1419,8 @@
     const nw = tg(() => nodeWins(s, R, team, bosses), null);
     const nl = choosing ? null : tg(() => nodeLeads(s, R, team, bosses), null);
     const checks = tg(() => buildChecks(s, team, bosses, adv, issues, sp && sp.fights, nw, nl), []) || [];
+    const wp = choosing ? null : tg(() => wallPlan(s, R, team, bosses), null);
+    if (wp) checks.unshift(wp.reset ? { lv: 'bad', msg: `Resetea: llegas a ${wp.wall.name} con un ${wp.pctNow}% y no quedan capturas en este mapa` } : { lv: wp.pctNow < 20 ? 'bad' : 'warn', msg: `${wp.wall.name}: ${wp.pctNow}% con tu equipo. ${wp.good.length ? 'Busca ' + wp.good.slice(0, 3).map(r => r.name).join(', ') : 'Sube nivel y tier'}` });
     const prevRoute = last && last.route;
     last = { cd, viAdv, tdat, pdat, vp, ts, tpick, toff, issues, adv, sfBoss: bosses[0] ? tg(() => simFight(s, team, bosses[0]), null) : null, bossName: bosses[0] ? bosses[0].name : null };
     setAlert(choosing ? [] : checks);
@@ -1384,7 +1435,8 @@
     hl += det('cov', 'Cobertura de tipos y tier', htmlCoverage(team) + htmlTiers(R, s));
     hl += det('log', `Registro de aciertos (${readLog().length} combates)`, tg(htmlLog, ''));
     const rp = choosing ? prevRoute || null : tg(() => routePlan(s, R, team, bosses), null);
-    last.route = rp; last.nodeWin = nw; last.nodeLead = nl; last.megas = tg(() => megaData(s, team, bosses), []);
+    last.route = rp; last.wall = wp; last.nodeWin = nw; last.nodeLead = nl; last.megas = tg(() => megaData(s, team, bosses), []);
+    if (wp) hr += `<h3>Plan contra ${esc(wp.wall.name)}</h3>` + tg(() => htmlWall(wp), '');
     if (rp && !choosing) hr += '<h3>Ruta recomendada</h3>' + tg(() => htmlRoute(rp), '');
     const aura = bosses[0] ? tg(() => auraAdvice(s, team, bosses[0]), null) : null;
     hr += '<h3>Próximo boss</h3>' + (last.sfBoss ? simLine(last.sfBoss, bosses[0].name) : '') + (aura ? tg(() => htmlAura(aura, bosses[0].name), '') : '') + (bosses.length ? tg(() => htmlBoss(team, bosses[0], s.items || []), '') : '<div class="plc-sub">No quedan jefes.</div>');

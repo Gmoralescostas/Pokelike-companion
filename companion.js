@@ -1,4 +1,4 @@
-/* Pokelike Companion v0.11.4 — solo lectura.
+/* Pokelike Companion v0.11.5 — solo lectura.
    Lee el estado del juego y usa sus propias funciones de cálculo.
    No hace clics ni modifica la partida. La semilla aleatoria del juego se
    guarda y se restaura alrededor de cada cálculo para no alterar los combates. */
@@ -573,7 +573,8 @@
           const g = td.list.find(x => x.ns.includes(n));
           if (!g || !g.mons.length) return;
           const lv = withSeed(() => tg(() => trainerFightLevel(n), null)) || g.lvl, ids = g.mons.map(m => m.speciesId);
-          out.set(n.id, { gain: 2, enemies: () => { const t = []; for (let j = 0; j < size; j++) { const m = mkFoe(pick(ids), lv, tier); if (m) t.push(m); } return t; } });
+          const real = trainerSamples.get(n.id + '|' + lv);
+          out.set(n.id, { gain: 2, real: !!(real && real.length), enemies: real && real.length ? () => dclone(real[Math.floor(Math.random() * real.length)]) : () => { const t = []; for (let j = 0; j < size; j++) { const m = mkFoe(pick(ids), lv, tier); if (m) t.push(m); } return t; } });
         } else if (n.type === 'catch' && w && w.mons.length) {
           const lv = withSeed(() => tg(() => getLevelForNode(n), null)) || w.lvl;
           let ids = w.mons.map(m => m.speciesId).filter(id => tg(() => minLevelForSpecies(id), 1) <= lv); if (!ids.length) ids = w.mons.map(m => m.speciesId);
@@ -644,6 +645,39 @@
     if (!ok) return null;
     const worst = Object.entries(deaths).sort((a, b) => b[1] - a[1])[0];
     return { reach: reach / ok, win: win / ok, n: ok, hp: reach ? hp / reach : 0, size: reach ? tsz / reach : team.length, lvl: reach ? lvs / reach : 0, worst: worst ? { id: worst[0], pct: Math.round(worst[1] / ok * 100) } : null };
+  }
+
+
+  /* ---------- equipos reales de entrenadores ---------- */
+  // Usa la función del juego que genera los equipos (trainerTeamSpecies) con semillas propias,
+  // y restaura la semilla del juego al terminar cada muestra.
+  const trainerSamples = new Map();
+  let sampling = false;
+  async function sampleTrainers() {
+    const s = getState(), ms = document.getElementById('map-screen');
+    if (sampling || !s || !s.map || !ms || !shown(ms) || typeof trainerTeamSpecies !== 'function' || !seedOK()) return;
+    const nodes = Object.values(s.map.nodes).filter(n => n.type === 'trainer' && !n.visited);
+    const cur = s.currentMap || 0, size = cur === 0 ? 1 : cur <= 2 ? 2 : 3, tier = tierForMap(cur);
+    const todo = nodes.map(n => ({ n, lv: withSeed(() => tg(() => trainerFightLevel(n), null)) })).filter(x => x.lv && !trainerSamples.has(x.n.id + '|' + x.lv));
+    if (!todo.length) return;
+    sampling = true;
+    try {
+      for (const { n, lv } of todo) {
+        const key = n.trainerSprite || 'aceTrainer', cfg = trainerCfg(key), teams = [];
+        for (let i = 0; i < 6; i++) {
+          const saved = _rngSeed;
+          try {
+            _rngSeed = (PAIR * 7 + i * 2654435761 + n.layer * 97) >>> 0;
+            const sp = await trainerTeamSpecies(key, cfg, lv, size);
+            const team = (sp || []).map(x => tg(() => createInstance(x, lv, false, tier), null)).filter(Boolean);
+            if (team.length) teams.push(team);
+          } catch (e) { } finally { _rngSeed = saved; }
+        }
+        trainerSamples.set(n.id + '|' + lv, teams);
+      }
+      [...persist.keys()].filter(k => /^(specs|nodewin|nodelead|route)/.test(k)).forEach(k => persist.delete(k));
+      lastSig = '';
+    } finally { sampling = false; }
   }
 
   /* ---------- ruta por el mapa ---------- */
@@ -1307,7 +1341,7 @@
     if (sig === lastSig) return;
     lastSig = sig;
     if (sig !== memoSig) { memoSig = sig; memoMap.clear(); }
-    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.4${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
+    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.5${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
     if (missing.length) hl += `<div class="plc-warn">Compatibilidad parcial con esta versión. Falta: ${esc(missing.join(', '))}</div>`;
     if (!seedOK()) hl += '<div class="plc-warn">Cálculo de daño desactivado: no puedo proteger la semilla del juego en esta versión.</div>';
     hl += reminders.map(r => `<div class="plc-rem">${esc(r.msg)}<button data-plc-rem="${r.id}" title="Descartar">×</button></div>`).join('');
@@ -1428,6 +1462,6 @@
 
   window.__PLC = { render: () => { lastSig = ''; render(); }, last: () => last };
   tg(hookBattle);
-  setInterval(() => { tg(hookBattle); tg(watch); tg(render); tg(applyMarks); tg(drawNodeLabels); }, 1000);
+  setInterval(() => { tg(hookBattle); tg(watch); tg(render); tg(applyMarks); tg(drawNodeLabels); tg(() => { sampleTrainers(); }); }, 1000);
   tg(render);
 })();

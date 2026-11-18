@@ -1218,13 +1218,15 @@
     const over = [...document.querySelectorAll('#item-equip-modal,.item-equip-overlay')].some(e => !e.closest('.plc-p') && shown(e) && e.getBoundingClientRect().width > 200);
     if (over || !last || !last.nodeWin || !s || !s.map || !ms || !shown(ms)) { nodeBox.innerHTML = ''; return; }
     let h = '';
-    last.nodeWin.forEach((pct, id) => {
+    last.nodeWin.forEach((pct0, id) => {
+      let pct = pct0;
       const n = s.map.nodes[id], el = document.querySelector('[data-node-id="' + id + '"]');
       if (!n || n.visited || !el) return;
       const r = el.getBoundingClientRect();
       if (!r.width || r.bottom < 0 || r.top > innerHeight) return;
       const ld = last.nodeLead && last.nodeLead.get ? last.nodeLead.get(id) : null;
       const lead = ld && n.accessible ? `<br><span class="plc-nl-lead">${ld.best.p === ld.cur.p ? '✓ ' : '1º '}${esc(nm(ld.best.p))}</span>` : '';
+      if (ld && n.accessible) pct = ld.best.pct; // con el líder recomendado
       h += `<span class="plc-nl ${pct >= 80 ? 'plc-nl-g' : pct >= 50 ? 'plc-nl-m' : 'plc-nl-b'}${n.accessible ? ' plc-nl-acc' : ''}" style="left:${Math.round(r.left + r.width / 2)}px;top:${Math.round(r.bottom - 6)}px">${pct}%${lead}</span>`;
     });
     nodeBox.innerHTML = h;

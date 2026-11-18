@@ -1,4 +1,4 @@
-/* Pokelike Companion v0.11.1 — solo lectura.
+/* Pokelike Companion v0.11.2 — solo lectura.
    Lee el estado del juego y usa sus propias funciones de cálculo.
    No hace clics ni modifica la partida. La semilla aleatoria del juego se
    guarda y se restaura alrededor de cada cálculo para no alterar los combates. */
@@ -9,6 +9,8 @@
 
   const TYPES = ['Normal', 'Fire', 'Water', 'Electric', 'Grass', 'Ice', 'Fighting', 'Poison', 'Ground', 'Flying', 'Psychic', 'Bug', 'Rock', 'Ghost', 'Dragon', 'Dark', 'Steel', 'Fairy'];
   const TEAM_CAP = 6;
+  // Visible en pantalla (también para capas fijas, donde offsetParent es null).
+  const shown = e => !!e && (e.getClientRects().length > 0 || e.offsetParent !== null) && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
   const tg = (f, d) => { try { const v = f(); return v === undefined ? d : v; } catch (e) { return d; } };
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const chip = t => `<span class="plc-t plc-t-${esc(String(t).toLowerCase())}">${esc(t)}</span>`;
@@ -322,7 +324,7 @@
   }
   function visibleCards() {
     const ids = ['catch-choices', 'trade-choices', 'swap-incoming', 'starter-screen'];
-    const els = window.__PLC_TEST_EL ? [window.__PLC_TEST_EL] : ids.map(i => document.getElementById(i)).filter(e => e && e.offsetParent !== null);
+    const els = window.__PLC_TEST_EL ? [window.__PLC_TEST_EL] : ids.map(i => document.getElementById(i)).filter(e => e && (window.__PLC_TEST_EL || shown(e)));
     for (const el of els) {
       const cards = [...el.querySelectorAll('.poke-card')].map(parseCard).filter(Boolean);
       if (cards.length) return { where: el.id || 'test', cards };
@@ -331,7 +333,7 @@
   }
   function visibleItems() {
     const el = document.getElementById('item-choices');
-    if (!el || el.offsetParent === null) return null;
+    if (!el || !shown(el)) return null;
     const pool = tg(() => ITEM_POOL, []) || [];
     const found = [];
     [...el.children].forEach(ch => {
@@ -947,7 +949,7 @@
   }
   function visibleTutor() {
     const m = document.getElementById('item-equip-modal');
-    return m && m.offsetParent !== null && m.querySelector('#btn-skip-tutor') ? m : null;
+    return m && shown(m) && m.querySelector('#btn-skip-tutor') ? m : null;
   }
   function htmlTutor(td) {
     if (!td) return '';
@@ -958,7 +960,7 @@
   // Pasivas ofrecidas en pantalla.
   function visiblePassives() {
     const el = document.getElementById('passive-choices'), sc = document.getElementById('passive-screen');
-    if (!el || !sc || sc.offsetParent === null) return null;
+    if (!el || !sc || !shown(sc)) return null;
     const pool = tg(() => PASSIVE_ITEM_POOL, []) || [], found = [];
     [...el.children].forEach(ch => {
       const txt = ch.textContent || '';
@@ -1027,7 +1029,7 @@
   const TRADE_PLUS = () => tg(() => ENDLESS2_TRADE_LEVELS, 3) || 3;
   function tradeStage() {
     const sc = document.getElementById('trade-screen');
-    if (!sc || sc.offsetParent === null) return null;
+    if (!sc || !shown(sc)) return null;
     const list = document.getElementById('trade-team-list'), ch = document.getElementById('trade-choices');
     if (ch && ch.style.display !== 'none' && ch.children.length) return { stage: 'offers', el: ch };
     if (list && list.style.display !== 'none' && list.children.length) return { stage: 'pick', el: list };
@@ -1208,7 +1210,8 @@
   }
   function drawNodeLabels() {
     const s = getState(), ms = document.getElementById('map-screen');
-    if (!last || !last.nodeWin || !s || !s.map || !ms || ms.offsetParent === null) { nodeBox.innerHTML = ''; return; }
+    const over = [...document.querySelectorAll('#item-equip-modal,.item-equip-overlay')].some(e => !e.closest('.plc-p') && shown(e) && e.getBoundingClientRect().width > 200);
+    if (over || !last || !last.nodeWin || !s || !s.map || !ms || !shown(ms)) { nodeBox.innerHTML = ''; return; }
     let h = '';
     last.nodeWin.forEach((pct, id) => {
       const n = s.map.nodes[id], el = document.querySelector('[data-node-id="' + id + '"]');
@@ -1297,7 +1300,7 @@
     if (sig === lastSig) return;
     lastSig = sig;
     if (sig !== memoSig) { memoSig = sig; memoMap.clear(); }
-    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.1${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
+    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.2${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
     if (missing.length) hl += `<div class="plc-warn">Compatibilidad parcial con esta versión. Falta: ${esc(missing.join(', '))}</div>`;
     if (!seedOK()) hl += '<div class="plc-warn">Cálculo de daño desactivado: no puedo proteger la semilla del juego en esta versión.</div>';
     hl += reminders.map(r => `<div class="plc-rem">${esc(r.msg)}<button data-plc-rem="${r.id}" title="Descartar">×</button></div>`).join('');

@@ -1,4 +1,4 @@
-/* Pokelike Companion v0.10.2 — solo lectura.
+/* Pokelike Companion v0.11.0 — solo lectura.
    Lee el estado del juego y usa sus propias funciones de cálculo.
    No hace clics ni modifica la partida. La semilla aleatoria del juego se
    guarda y se restaura alrededor de cada cálculo para no alterar los combates. */
@@ -79,7 +79,7 @@
     let w = 0, ok = 0, faint = 0;
     try {
       for (let i = 0; i < n; i++) {
-        _rngSeed = (Math.random() * 4294967296) >>> 0;
+        _rngSeed = (extra && extra.seed != null ? (extra.seed + i * 2654435761) : Math.random() * 4294967296) >>> 0;
         const cfg = freshCfg(s, pas);
         if (cfg === undefined) break;
         const P = dclone(pTeam);
@@ -93,12 +93,13 @@
     return ok ? { pct: Math.round(w / ok * 100), n: ok, faint: faint / ok } : null;
   }
   // Probabilidad de ganar con el orden actual y con cada miembro como líder.
+  const PAIR = 91733;
   function simFight(s, team, foe) {
     return memo('sim|' + foe.name, () => {
-      const base = simRun(s, team, foe.mons, 100);
+      const base = simRun(s, team, foe.mons, 100, false, { seed: PAIR });
       if (!base) return null;
       const alive = team.filter(p => p.currentHp > 0);
-      const rows = alive.map((p, i) => i === 0 ? { p, pct: base.pct } : { p, pct: (simRun(s, [p].concat(team.filter(o => o !== p)), foe.mons, 60) || base).pct });
+      const rows = alive.map((p, i) => i === 0 ? { p, pct: base.pct } : { p, pct: (simRun(s, [p].concat(team.filter(o => o !== p)), foe.mons, 100, false, { seed: PAIR }) || base).pct });
       return { base, rows, cur: rows[0], best: rows.slice().sort((a, b) => b.pct - a.pct)[0] };
     });
   }
@@ -148,7 +149,7 @@
     return memo('aura|' + foe.name, () => {
       const ready = aurasReady();
       if (!ready.length) return null;
-      const base = simRun(s, team, foe.mons, 100);
+      const base = simRun(s, team, foe.mons, 100, false, { seed: PAIR });
       if (!base) return null;
       const alive = team.filter(p => p.currentHp > 0), out = [];
       if (ready.includes('life')) {
@@ -351,9 +352,15 @@
       return g / Math.max(1, boss.mons.length);
     }));
   }
+  const itemType = item => { const tmap = tg(() => TYPE_ITEM_MAP, {}) || {}; return item ? Object.keys(tmap).find(t => tmap[t] === item.id) || null : null; };
+  // Objetos de tipo: solo sirven a quien ataca con ese tipo.
+  const itemUsers = (item, list) => { const ty = itemType(item); return ty ? list.filter(p => (moveOf(p) || {}).type === ty) : list; };
   function bestHolder(item, team, boss, bag) {
-    const alive = team.filter(p => p.currentHp > 0);
+    let alive = team.filter(p => p.currentHp > 0);
     if (!alive.length) return null;
+    const ty0 = itemType(item);
+    alive = itemUsers(item, alive);
+    if (!alive.length) return { p: null, g: 0, note: 'nadie de tu equipo ataca con tipo ' + ty0 };
     let rows = boss && seedOK() ? alive.map(p => ({ p, g: itemGain(p, item, boss, bag) })).sort((a, b) => b.g - a.g) : [];
     if (rows.length && rows[0].g >= 1.5) return { p: rows[0].p, g: rows[0].g, rows };
     const tmap = tg(() => TYPE_ITEM_MAP, {}) || {};
@@ -460,7 +467,8 @@
       const bag = s.items || [];
       team.filter(p => p.heldItem && typeof p.heldItem === 'object' && p.currentHp > 0).forEach(p => {
         const mine = itemGain(p, p.heldItem, boss, bag);
-        const alt = team.filter(o => o !== p && !o.heldItem && o.currentHp > 0).map(o => ({ o, g: itemGain(o, p.heldItem, boss, bag) })).sort((a, b) => b.g - a.g)[0];
+        if (itemType(p.heldItem) && (moveOf(p) || {}).type !== itemType(p.heldItem)) { const u = itemUsers(p.heldItem, team.filter(o => o !== p && o.currentHp > 0))[0]; out.push(u ? { kind: 'swap', p, o: u, item: p.heldItem, gain: 0, wrongType: true } : { kind: 'useless', p, item: p.heldItem }); return; }
+        const alt = itemUsers(p.heldItem, team.filter(o => o !== p && !o.heldItem && o.currentHp > 0)).map(o => ({ o, g: itemGain(o, p.heldItem, boss, bag) })).sort((a, b) => b.g - a.g)[0];
         if (alt && alt.g > mine * 1.3 + 3) out.push({ kind: 'swap', p, o: alt.o, item: p.heldItem, gain: alt.g - mine });
       });
       bag.filter(i => i && typeof i === 'object' && !i.usable).forEach(it => {
@@ -474,7 +482,9 @@
     const issues = itemIssues(s, team, boss);
     if (!(s.items || []).some(i => i && typeof i === 'object' && !i.usable) && !team.some(p => p.heldItem)) return '<div class="plc-sub">Sin objetos todavía.</div>';
     if (!issues.length) return '<div class="plc-good">Objetos bien repartidos para el próximo boss.</div>';
-    return issues.map(x => x.kind === 'swap'
+    return issues.map(x => x.kind === 'useless' ? `<div class="plc-warn">${esc(itemName(x.item))} en ${esc(nm(x.p))} no sirve: nadie de tu equipo ataca con tipo ${esc(itemType(x.item))}.</div>`
+      : x.kind === 'swap' && x.wrongType ? `<div class="plc-warn">${esc(itemName(x.item))} solo potencia ataques de tipo ${esc(itemType(x.item))}: pásalo de ${esc(nm(x.p))} a <b>${esc(nm(x.o))}</b>.</div>`
+      : x.kind === 'swap'
       ? `<div class="plc-warn">${esc(itemName(x.item))}: mejor en <b>${esc(nm(x.o))}</b> que en ${esc(nm(x.p))} (+${x.gain.toFixed(0)} pts)</div>`
       : `<div class="plc-warn">${esc(itemName(x.item))} sin equipar: dáselo a <b>${esc(nm(x.o))}</b>${x.gain >= 3 ? ' (+' + x.gain.toFixed(0) + ' pts)' : ''}</div>`).join('');
   }
@@ -813,12 +823,35 @@
       return { mons, lvl, lvlLo, tc, lead, left: wn.length };
     });
   }
+
+  // Líder por cada combate salvaje: según las especies que pueden salir en ese nodo y a su nivel.
+  function nodeLeads(s, R, team, bosses) {
+    return pmemo('nodelead', s, () => {
+      const specs = tg(() => fightSpecs(s, R, team, bosses), null), out = new Map();
+      const alive = team.filter(p => p.currentHp > 0);
+      if (!specs || alive.length < 2) return out;
+      Object.values((s.map && s.map.nodes) || {}).filter(n => n.accessible && !n.visited && (n.type === 'battle' || n.type === 'trainer')).forEach(n => {
+        const sp = specs.get(n.id);
+        if (!sp || !sp.enemies) return;
+        const foes = []; for (let i = 0; i < 10; i++) foes.push(sp.enemies());
+        const rows = alive.map(p => {
+          const order = [p].concat(team.filter(o => o !== p));
+          let w = 0, k = 0, hp = 0;
+          foes.forEach((E, i) => { const r = simRun(s, order, E, 1, false, { seed: PAIR + i * 17 }); if (r) { k++; w += r.pct / 100; } });
+          return { p, pct: k ? Math.round(w / k * 100) : 0 };
+        }).sort((a, b) => b.pct - a.pct);
+        const cur = rows.find(r => r.p === alive[0]) || rows[0];
+        out.set(n.id, { best: rows[0], cur, rows });
+      });
+      return out;
+    });
+  }
   function htmlGrass(s, R, team) {
     const w = wildData(s, R, team);
     if (!w) return '<div class="plc-sub">No disponible para este mapa.</div>';
     const n = w.mons.length;
     return `<div class="plc-sub">nv ${w.lvlLo < w.lvl ? w.lvlLo + '–' + w.lvl : w.lvl} · ${n} especies, ${(100 / n).toFixed(1)}% cada una</div>
-      ${w.lead.length ? `<div>Lidera con <b>${esc(nm(w.lead[0].p))}</b> <span class="${w.lead[0].pct >= 70 ? 'plc-good' : w.lead[0].pct >= 40 ? 'plc-mid' : 'plc-bad'}">gana ${w.lead[0].pct}% de los duelos</span></div>` : ''}
+      ${(() => { const nl = last && last.nodeLead; const acc = nl && nl.forEach ? [...nl.entries()].filter(([id]) => s.map.nodes[id] && s.map.nodes[id].type === 'battle') : []; return acc.length ? acc.map(([id, x]) => `<div>${esc(nodeName(s.map.nodes[id]))}${nodeSide(s.map.nodes[id], s.map.nodes) ? ' (' + nodeSide(s.map.nodes[id], s.map.nodes) + ')' : ''}: lidera con <b>${esc(nm(x.best.p))}</b> <span class="${simCls(x.best.pct)}">${x.best.pct}%</span>${x.best.p !== x.cur.p ? ` <span class="plc-sub">(con ${esc(nm(x.cur.p))}: ${x.cur.pct}%)</span>` : ''}</div>`).join('') : (w.lead.length ? `<div>Lidera con <b>${esc(nm(w.lead[0].p))}</b> <span class="${w.lead[0].pct >= 70 ? 'plc-good' : w.lead[0].pct >= 40 ? 'plc-mid' : 'plc-bad'}">gana ${w.lead[0].pct}% de los duelos</span></div>` : ''); })()}
       <div>${Object.entries(w.tc).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t, c]) => chip(t) + `<span class="plc-sub">${Math.round(c / n * 100)}%</span> `).join('')}</div>
       ${det('grass', 'Ver especies', `<div class="plc-sub">${w.mons.map(m => esc(m.name)).join(', ')}</div>`)}`;
   }
@@ -858,6 +891,7 @@
   }
   // % de victoria del equipo contra el próximo boss (tal como estás) y contra los dos siguientes (a su nivel, con evoluciones).
   function teamOutlook(s, team, bosses, n, extra) {
+    extra = Object.assign({ seed: PAIR }, extra || {});
     // Próximo boss: al nivel con el que sueles llegar (3 por debajo de su máximo, o el tuyo si ya vas por encima).
     const b0 = bosses[0], lv0 = b0 ? Math.max(...b0.mons.map(m => m.level)) - 3 : 0;
     const r0 = b0 ? simRun(s, team.map(p => p.level >= lv0 ? p : grownTo(p, lv0, 0)), b0.mons, n, false, extra) : null;
@@ -951,8 +985,10 @@
       if (!canSim(s, team, bosses)) return null;
       const base = baseOutlook(s, team, bosses), alive = team.filter(p => p.currentHp > 0);
       return vi.map(({ it }) => {
-        const rows = alive.map(p => { const o = teamOutlook(s, team.map(q => q === p ? Object.assign({}, q, { heldItem: it }) : q), bosses, 36); return { p, gain: Math.round(gainOf(o, base)), lose: p.heldItem }; }).sort((a, b) => b.gain - a.gain);
-        return { it, b: rows[0] ? { p: rows[0].p, g: rows[0].gain, sim: true, lose: rows[0].lose } : null, rows };
+        const users = itemUsers(it, alive), ty = itemType(it);
+        if (!users.length) return { it, b: { p: null, g: 0, sim: true, note: 'nadie de tu equipo ataca con tipo ' + ty }, rows: [] };
+        const rows = users.map(p => { const o = teamOutlook(s, team.map(q => q === p ? Object.assign({}, q, { heldItem: it }) : q), bosses, 36); return { p, gain: Math.round(gainOf(o, base)), lose: p.heldItem }; }).sort((a, b) => b.gain - a.gain);
+        return { it, b: rows[0] ? { p: rows[0].p, g: rows[0].gain, sim: true, lose: rows[0].lose, note: ty ? 'potencia los ataques de tipo ' + ty : '' } : null, rows };
       });
     });
   }
@@ -964,12 +1000,13 @@
         const st = tg(() => getOwnedMegaStoneForLine(p.speciesId), null);
         if (!st) return;
         const held = p.heldItem && p.heldItem.isMegaStone && p.heldItem.id === st.id;
+        const wrongHolder = !held && team.some(q => q !== p && q.heldItem && q.heldItem.isMegaStone && q.heldItem.id === st.id);
         const item = tg(() => makeMegaStoneItem(st), null);
         const ready = item && item.megaSpecies === p.speciesId;
         let gain = null;
         if (ready && !held && canSim(s, team, bosses)) gain = Math.round(gainOf(teamOutlook(s, team.map(q => q === p ? Object.assign({}, q, { heldItem: item }) : q), bosses, 50), baseOutlook(s, team, bosses)));
         const need = !ready ? tg(() => dex(st.species).name, null) : null;
-        out.push({ p, st, held, ready, gain, need });
+        out.push({ p, st, held, ready, gain, need, wrongHolder });
       });
       return out;
     });
@@ -1083,7 +1120,7 @@
       if (cd.mine.length) h += det('mine', 'Puntos de tu equipo', `<div class="plc-sub">${cd.mine.map(x => `${esc(nm(x.p))} ${x.sc.total}`).join(' · ')}<br>0–100, orientativo: 40% jefes que quedan, 25% stats y potencia, 20% cobertura, 15% nivel.</div>`);
     }
     (viAdv || []).forEach(({ it, b }) => {
-      if (b && b.sim) { h += `<div class="plc-enemy"><b>${esc(it.name)}</b> → ${b.g >= 2 ? `<b class="plc-good">${esc(nm(b.p))}</b> <span class="plc-sub">${sgn(b.g)} pts${b.lose ? ', deja ' + esc(itemName(b.lose)) : ''}</span>` : '<span class="plc-sub">no cambia tus combates de forma medible</span>'}<div class="plc-sub">${esc(it.desc || '')}</div></div>`; return; }
+      if (b && b.sim) { h += `<div class="plc-enemy"><b>${esc(it.name)}</b> → ${b.p && b.g >= 3 ? `<b class="plc-good">${esc(nm(b.p))}</b> <span class="plc-sub">${sgn(b.g)} pts${b.lose ? ', deja ' + esc(itemName(b.lose)) : ''}</span>` : b.p ? `<b>${esc(nm(b.p))}</b> <span class="plc-sub">si lo coges (apenas cambia tus combates)</span>` : `<span class="plc-sub">${esc(b.note || 'no cambia tus combates de forma medible')}</span>`}<div class="plc-sub">${esc(it.desc || '')}</div></div>`; return; }
       h += `<div class="plc-enemy"><b>${esc(it.name)}</b> → ${b && b.p ? `<b class="plc-good">${esc(nm(b.p))}</b>` : '<span class="plc-sub">sin portador claro</span>'} <span class="plc-sub">${b && b.g >= 1.5 ? '+' + b.g.toFixed(0) + ' pts vs ' + esc(bosses[0] ? bosses[0].name : 'boss') : esc((b && b.note) || '')}</span></div>`;
     });
     return h;
@@ -1118,11 +1155,13 @@
   }
 
   /* ---------- alertas, checklist y marcas sobre el juego ---------- */
-  function buildChecks(s, team, bosses, adv, issues, fights, nw) {
+  function buildChecks(s, team, bosses, adv, issues, fights, nw, nl) {
     const mapTier = tierForMap(s.currentMap || 0), lag = team.filter(p => mapTier != null && p.moveTier != null && p.moveTier < mapTier).map(nm);
     const c = [];
     if (adv) c.push(adv.bad ? { lv: 'bad', msg: `Orden: lidera ${nm(adv.cur.p)} (${adv.cur.pct}%). Pon primero a ${nm(adv.best.p)} (${adv.best.pct}%)` } : { lv: 'ok', msg: `Orden: ${nm(adv.cur.p)} es buen líder (${adv.cur.pct}%)` });
-    issues.forEach(x => c.push({ lv: 'warn', msg: x.kind === 'swap' ? `${itemName(x.item)}: pásalo de ${nm(x.p)} a ${nm(x.o)}` : `${itemName(x.item)} sin equipar: dáselo a ${nm(x.o)}` }));
+    issues.forEach(x => c.push({ lv: 'warn', msg: x.kind === 'useless' ? `${itemName(x.item)} en ${nm(x.p)} no sirve (nadie ataca con tipo ${itemType(x.item)})` : x.kind === 'swap' ? `${itemName(x.item)}: pásalo de ${nm(x.p)} a ${nm(x.o)}` : `${itemName(x.item)} sin equipar: dáselo a ${nm(x.o)}` }));
+    tg(() => megaData(s, team, bosses), []).forEach(m => { if (m.ready && !m.held) c.push({ lv: 'warn', msg: `Megapiedra sin equipar: ${m.st.name} para ${nm(m.p)}${m.gain != null ? ' (' + sgn(m.gain) + ' pts)' : ''}` }); else if (m.wrongHolder) c.push({ lv: 'warn', msg: `${m.st.name} la lleva quien no puede usarla: dásela a ${nm(m.p)}` }); });
+    (s.items || []).filter(i => i && i.isMegaStone).forEach(i => c.push({ lv: 'warn', msg: `Tienes ${i.name} en la bolsa sin equipar` }));
     if (!issues.length && (team.some(p => p.heldItem) || (s.items || []).length)) c.push({ lv: 'ok', msg: 'Objetos bien repartidos' });
     if (bosses[0]) {
       const diff = Math.round(sum(team.map(p => p.level)) / team.length - Math.max(...bosses[0].mons.map(m => m.level)));
@@ -1133,6 +1172,11 @@
     if (nw) Object.values((s.map && s.map.nodes) || {}).filter(n => n.accessible && !n.visited && n.type !== 'boss' && nw.has(n.id) && nw.get(n.id) < 70).forEach(n => {
       const pct = nw.get(n.id), side = nodeSide(n, s.map.nodes), safe = n.type === 'sycamore';
       c.push({ lv: pct < 50 && !safe ? 'bad' : 'warn', msg: `${pct < 50 && !safe ? 'No entres en' : 'Cuidado con'} ${nodeName(n)}${side ? ' (' + side + ')' : ''}: ganas el ${pct}%${safe ? ' (sin muerte permanente)' : ''}` });
+    });
+    if (nl) nl.forEach((x, id) => {
+      const n = s.map.nodes[id]; if (!n) return;
+      const side = nodeSide(n, s.map.nodes);
+      if (x.best.p !== x.cur.p && x.best.pct - x.cur.pct >= 15) c.push({ lv: x.cur.pct < 50 ? 'bad' : 'warn', msg: `Si vas a ${nodeName(n)}${side ? ' (' + side + ')' : ''}: lidera con ${nm(x.best.p)} (${x.best.pct}% frente a ${x.cur.pct}% con ${nm(x.cur.p)})` });
     });
     if (adv && adv.boss && bosses[0]) { const a = tg(() => auraAdvice(s, team, bosses[0]), null); if (a && a.best && a.base < 85 && a.best.pct - a.base >= 15) c.push({ lv: 'warn', msg: `Tienes ${AURA[a.best.k][1]}: ${a.best.how} y pasas de ${a.base}% a ${a.best.pct}%` }); }
     const alive = team.filter(p => p.currentHp > 0);
@@ -1167,7 +1211,9 @@
       if (!n || n.visited || !el) return;
       const r = el.getBoundingClientRect();
       if (!r.width || r.bottom < 0 || r.top > innerHeight) return;
-      h += `<span class="plc-nl ${pct >= 80 ? 'plc-nl-g' : pct >= 50 ? 'plc-nl-m' : 'plc-nl-b'}${n.accessible ? ' plc-nl-acc' : ''}" style="left:${Math.round(r.left + r.width / 2)}px;top:${Math.round(r.bottom - 6)}px">${pct}%</span>`;
+      const ld = last.nodeLead && last.nodeLead.get ? last.nodeLead.get(id) : null;
+      const lead = ld && n.accessible ? `<br><span class="plc-nl-lead">${ld.best.p === ld.cur.p ? '✓ ' : '1º '}${esc(nm(ld.best.p))}</span>` : '';
+      h += `<span class="plc-nl ${pct >= 80 ? 'plc-nl-g' : pct >= 50 ? 'plc-nl-m' : 'plc-nl-b'}${n.accessible ? ' plc-nl-acc' : ''}" style="left:${Math.round(r.left + r.width / 2)}px;top:${Math.round(r.bottom - 6)}px">${pct}%${lead}</span>`;
     });
     nodeBox.innerHTML = h;
   }
@@ -1191,7 +1237,8 @@
       const cd = last.cd, adv = last.adv;
       if (cd && cd.verdict === 'swap') mark(slot(cd.worst.p), 'bad', 'quitar · ' + cd.worst.sc.total);
       if (adv && adv.bad) { mark(slot(adv.cur.p), 'bad', 'líder · ' + adv.cur.pct + '%'); mark(slot(adv.best.p), 'good', 'ponlo 1º · ' + adv.best.pct + '%'); }
-      (last.issues || []).forEach(x => { if (x.kind === 'swap') mark(slot(x.p), 'warn', 'objeto → ' + nm(x.o)); else mark(slot(x.o), 'warn', 'dale ' + itemName(x.item)); });
+      (last.issues || []).forEach(x => { if (x.kind === 'swap') mark(slot(x.p), 'warn', 'objeto → ' + nm(x.o)); else if (x.kind === 'useless') mark(slot(x.p), 'warn', 'objeto inútil'); else mark(slot(x.o), 'warn', 'dale ' + itemName(x.item)); });
+      (last.megas || []).forEach(m => { if (m.ready && !m.held) mark(slot(m.p), 'warn', 'equipa ' + m.st.name); });
     });
     if (last.cd) {
       const vc = tg(visibleCards, null);
@@ -1218,7 +1265,7 @@
     }
     if (last.viAdv) {
       const vi = tg(visibleItems, null);
-      if (vi) vi.forEach(v => { const a = last.viAdv.find(k => k.it === v.it); if (a && a.b && a.b.p) mark(v.el, a.b.g >= 2 ? 'good' : 'info', a.b.sim ? (a.b.g >= 2 ? '→ ' + nm(a.b.p) + ' ' + sgn(a.b.g) : '±0') : '→ ' + nm(a.b.p) + (a.b.g >= 1.5 ? ' +' + a.b.g.toFixed(0) : '')); });
+      if (vi) vi.forEach(v => { const a = last.viAdv.find(k => k.it === v.it); if (!a || !a.b) return; if (!a.b.p) { mark(v.el, 'info', 'nadie lo usa'); return; } mark(v.el, a.b.g >= 3 ? 'good' : 'info', a.b.sim ? (a.b.g >= 3 ? '→ ' + nm(a.b.p) + ' ' + sgn(a.b.g) : '→ ' + nm(a.b.p) + ' ±0') : '→ ' + nm(a.b.p) + (a.b.g >= 1.5 ? ' +' + a.b.g.toFixed(0) : '')); });
     }
   }
 
@@ -1246,7 +1293,7 @@
     if (sig === lastSig) return;
     lastSig = sig;
     if (sig !== memoSig) { memoSig = sig; memoMap.clear(); }
-    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.10.2${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
+    let hl = `<h2>Pokelike Companion <span class="plc-sub">v0.11.0${window.__PLC_SOURCE === 'github' ? ' · auto' : ''}</span></h2>`;
     if (missing.length) hl += `<div class="plc-warn">Compatibilidad parcial con esta versión. Falta: ${esc(missing.join(', '))}</div>`;
     if (!seedOK()) hl += '<div class="plc-warn">Cálculo de daño desactivado: no puedo proteger la semilla del juego en esta versión.</div>';
     hl += reminders.map(r => `<div class="plc-rem">${esc(r.msg)}<button data-plc-rem="${r.id}" title="Descartar">×</button></div>`).join('');
@@ -1273,7 +1320,8 @@
     const issues = tg(() => itemIssues(s, team, bosses[0]), []) || [];
     const sp = tg(() => specialFights(s), null);
     const nw = tg(() => nodeWins(s, R, team, bosses), null);
-    const checks = tg(() => buildChecks(s, team, bosses, adv, issues, sp && sp.fights, nw), []) || [];
+    const nl = choosing ? null : tg(() => nodeLeads(s, R, team, bosses), null);
+    const checks = tg(() => buildChecks(s, team, bosses, adv, issues, sp && sp.fights, nw, nl), []) || [];
     const prevRoute = last && last.route;
     last = { cd, viAdv, tdat, pdat, vp, ts, tpick, toff, issues, adv, sfBoss: bosses[0] ? tg(() => simFight(s, team, bosses[0]), null) : null, bossName: bosses[0] ? bosses[0].name : null };
     setAlert(choosing ? [] : checks);
@@ -1288,7 +1336,7 @@
     hl += det('cov', 'Cobertura de tipos y tier', htmlCoverage(team) + htmlTiers(R, s));
     hl += det('log', `Registro de aciertos (${readLog().length} combates)`, tg(htmlLog, ''));
     const rp = choosing ? prevRoute || null : tg(() => routePlan(s, R, team, bosses), null);
-    last.route = rp; last.nodeWin = nw;
+    last.route = rp; last.nodeWin = nw; last.nodeLead = nl; last.megas = tg(() => megaData(s, team, bosses), []);
     if (rp && !choosing) hr += '<h3>Ruta recomendada</h3>' + tg(() => htmlRoute(rp), '');
     const aura = bosses[0] ? tg(() => auraAdvice(s, team, bosses[0]), null) : null;
     hr += '<h3>Próximo boss</h3>' + (last.sfBoss ? simLine(last.sfBoss, bosses[0].name) : '') + (aura ? tg(() => htmlAura(aura, bosses[0].name), '') : '') + (bosses.length ? tg(() => htmlBoss(team, bosses[0], s.items || []), '') : '<div class="plc-sub">No quedan jefes.</div>');
@@ -1364,7 +1412,7 @@
     tip.style.top = Math.min(ev.clientY + 14, innerHeight - tip.offsetHeight - 6) + 'px';
   }, true);
 
-  window.__PLC = { render: () => { lastSig = ''; render(); } };
+  window.__PLC = { render: () => { lastSig = ''; render(); }, last: () => last };
   tg(hookBattle);
   setInterval(() => { tg(hookBattle); tg(watch); tg(render); tg(applyMarks); tg(drawNodeLabels); }, 1000);
   tg(render);

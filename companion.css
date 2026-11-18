@@ -47,3 +47,4 @@
 .plc-nl{position:fixed;transform:translateX(-50%);font:700 10px/1.2 system-ui,sans-serif;color:#fff;padding:0 4px;border-radius:3px;opacity:.8;white-space:nowrap}
 .plc-nl-acc{font-size:13px;opacity:1;padding:1px 6px;border:1px solid #fff}
 .plc-nl-g{background:#1e7a3c}.plc-nl-m{background:#8a5a00}.plc-nl-b{background:#b3261e}
+.plc-nl-lead{font-size:10px;font-weight:600}
